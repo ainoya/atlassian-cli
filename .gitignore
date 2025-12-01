@@ -1,0 +1,8 @@
+zig-cache/
+zig-out/
+.zig-cache/
+.envrc
+*.swp
+*.swo
+*~
+.DS_Store

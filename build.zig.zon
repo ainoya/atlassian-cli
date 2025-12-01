@@ -1,0 +1,12 @@
+.{
+    .name = .atlassian_cli,
+    .version = "0.1.0",
+    .fingerprint = 0xab1a763f92288908,
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

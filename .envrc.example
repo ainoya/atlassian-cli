@@ -1,0 +1,11 @@
+# Atlassian CLI Environment Variables
+# Copy this file to .envrc and fill in your values
+# Then run: direnv allow
+
+export ATLASSIAN_URL="https://your-domain.atlassian.net"
+export ATLASSIAN_USERNAME="your-email@example.com"
+export ATLASSIAN_API_TOKEN="your-api-token-here"
+export ATLASSIAN_CLOUD="true"  # true for Cloud, false for Server/DC
+
+# Confluence-specific settings
+export CONFLUENCE_BASE_PATH="/wiki"  # Default for Confluence Cloud
