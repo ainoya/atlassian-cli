@@ -1,0 +1,5 @@
+[tagpr]
+releaseBranch = "main"
+versionFile = "VERSION"
+postVersionCommand = "scripts/sync_zig_version.sh"
+vPrefix = true

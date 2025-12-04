@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  tagpr:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tagpr.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: 1053852
+          private-key: ${{ secrets.AINOYA_BOT_PRIVATE_KEY }}
+      - name: Get GitHub App User ID
+        id: get-user-id
+        run: echo "user-id=$(gh api "/users/${{ steps.app-token.outputs.app-slug }}[bot]" --jq .id)" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      - run: |
+          git config --global user.name '${{ steps.app-token.outputs.app-slug }}[bot]'
+          git config --global user.email '${{ steps.get-user-id.outputs.user-id }}+${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com>'
+      - uses: Songmu/tagpr@v1
+        id: tagpr
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  goreleaser:
+    needs: tagpr
+    if: needs.tagpr.outputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: git fetch --force --tags
+      - run: git checkout ${{ needs.tagpr.outputs.tag }}
+      
+      - uses: jdx/mise-action@v2
+        with:
+          cache: true
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: 1053852
+          private-key: ${{ secrets.AINOYA_BOT_PRIVATE_KEY }}
+          owner: ainoya
+          repositories: |
+            homebrew-tap
+            atlassian-cli
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # If you have a separate token for Homebrew Tap, add it here.
+          # For now assuming GITHUB_TOKEN has permissions or user will configure it.
+          TAP_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          
+          # Sign the binary
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
