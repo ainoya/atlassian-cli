@@ -349,7 +349,7 @@ pub fn formatJiraIssue(allocator: std.mem.Allocator, json_str: []const u8) ![]u8
 }
 
 /// Format Confluence page as readable text
-/// base_url: AtlassianのベースURL（例: https://your-domain.atlassian.net）
+/// base_url: Atlassian base URL (e.g. https://your-domain.atlassian.net)
 pub fn formatConfluencePage(allocator: std.mem.Allocator, json_str: []const u8, base_url: []const u8) ![]u8 {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
     defer parsed.deinit();
@@ -396,7 +396,7 @@ pub fn formatConfluencePage(allocator: std.mem.Allocator, json_str: []const u8, 
         if (root.get("space")) |space| {
             const space_obj = space.object;
             if (space_obj.get("key")) |key| {
-                // ベースURLからConfluenceページのURLを動的に生成
+                // Dynamically generate Confluence page URL from base URL
                 try writer.print("URL: {s}/wiki/spaces/{s}/pages/{s}\n", .{ base_url, key.string, page_id });
             }
         }

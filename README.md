@@ -34,7 +34,32 @@ The binary will be available at `./zig-out/bin/atlassian-cli`
 
 ## Configuration
 
-Set the following environment variables:
+You can configure the CLI using the built-in configuration command (recommended) or environment variables.
+
+### Using Config Command
+
+Run the following commands to set your credentials persistently:
+
+```bash
+# Set Atlassian URL
+atlassian-cli config set atlassian_url https://your-domain.atlassian.net
+
+# Set Username (Email)
+atlassian-cli config set atlassian_username your-email@example.com
+
+# Set API Token
+atlassian-cli config set atlassian_api_token your-api-token
+```
+
+To view current configuration:
+
+```bash
+atlassian-cli config get atlassian_url
+```
+
+### Environment Variables
+
+Environment variables take precedence over the configuration file. Set the following:
 
 ```bash
 export ATLASSIAN_URL="https://your-domain.atlassian.net"

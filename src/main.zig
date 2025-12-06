@@ -4,11 +4,14 @@ const AtlassianClient = atlassian_cli.AtlassianClient;
 const JiraClient = atlassian_cli.JiraClient;
 const ConfluenceClient = atlassian_cli.ConfluenceClient;
 const formatter = atlassian_cli.formatter;
+
 const OutputFormat = formatter.OutputFormat;
+const config_mod = @import("config.zig");
 
 const Service = enum {
     jira,
     confluence,
+    config,
 };
 
 const JiraCommand = enum {
@@ -44,8 +47,9 @@ fn printHelp() !void {
         \\Services:
         \\  jira          Jira operations
         \\  confluence    Confluence operations
+        \\  config        Configuration management
         \\
-        \\Environment Variables (required):
+        \\Environment Variables (required if not set in config):
         \\  ATLASSIAN_URL            Your Atlassian instance URL (e.g., https://your-domain.atlassian.net)
         \\  ATLASSIAN_USERNAME       Your email address
         \\  ATLASSIAN_API_TOKEN      Your API token
@@ -296,7 +300,7 @@ fn handleJiraCommand(allocator: std.mem.Allocator, client: *AtlassianClient, arg
     }
 }
 
-/// ConfluenceコマンドのハンドラーにベースURLを渡すように修正
+/// Modify Confluence command handler to pass base URL
 fn handleConfluenceCommand(allocator: std.mem.Allocator, client: *AtlassianClient, args: []const [:0]const u8, base_url: []const u8) !void {
     if (args.len < 1) {
         try printConfluenceHelp();
@@ -329,7 +333,7 @@ fn handleConfluenceCommand(allocator: std.mem.Allocator, client: *AtlassianClien
             defer allocator.free(response);
 
             if (output_format == .text) {
-                // ベースURLをフォーマッターに渡してページURLを動的に生成
+                // Pass base URL to formatter to dynamically generate page URL
                 const formatted = try formatter.formatConfluencePage(allocator, response, base_url);
                 defer allocator.free(formatted);
                 std.debug.print("{s}", .{formatted});
@@ -489,27 +493,80 @@ pub fn main() !void {
         switch (service) {
             .jira => try printJiraHelp(),
             .confluence => try printConfluenceHelp(),
+            .config => try printHelp(),
         }
         return;
     }
 
-    // Get environment variables
-    const base_url = std.process.getEnvVarOwned(allocator, "ATLASSIAN_URL") catch |err| {
-        std.debug.print("Error: ATLASSIAN_URL environment variable not set\n", .{});
+    // Load config
+    var config = config_mod.Config.init(allocator);
+    defer config.deinit();
+    try config.load();
+
+    // Config command specific handling (doesn't need auth vars)
+    if (service == .config) {
+        if (args.len < 4) { // service + subcommand + key = 4 min? No, atlassian-cli config set key val -> 4 args
+            // args[0] = exe, args[1] = config, args[2] = set/get
+            if (args.len < 3) {
+                std.debug.print("Usage: {s} config <set|get> <key> [value]\n", .{args[0]});
+                return;
+            }
+        }
+
+        const subcommand = args[2];
+        if (std.mem.eql(u8, subcommand, "set")) {
+            if (args.len < 5) {
+                std.debug.print("Usage: {s} config set <key> <value>\n", .{args[0]});
+                return;
+            }
+            try config.set(args[3], args[4]);
+            try config.save();
+            std.debug.print("✅ Updated {s}\n", .{args[3]});
+        } else if (std.mem.eql(u8, subcommand, "get")) {
+            if (args.len < 4) {
+                std.debug.print("Usage: {s} config get <key>\n", .{args[0]});
+                return;
+            }
+            if (config.get(args[3])) |val| {
+                std.debug.print("{s}\n", .{val});
+            } else {
+                std.debug.print("(null)\n", .{});
+            }
+        } else {
+            std.debug.print("Unknown config subcommand: {s}\n", .{subcommand});
+        }
+        return;
+    }
+
+    // Get environment variables or config
+    // Helper to get optional env var
+    const env_url = std.process.getEnvVarOwned(allocator, "ATLASSIAN_URL") catch alias: {
+        break :alias null;
+    };
+    defer if (env_url) |e| allocator.free(e);
+
+    const base_url = try config_mod.resolve(allocator, env_url, config.atlassian_url, false) orelse {
+        std.debug.print("Error: ATLASSIAN_URL environment variable not set and no config found.\n", .{});
         std.debug.print("Example: export ATLASSIAN_URL=https://your-domain.atlassian.net\n", .{});
-        return err;
+        return error.ConfigurationMissing;
     };
     defer allocator.free(base_url);
 
-    const username = std.process.getEnvVarOwned(allocator, "ATLASSIAN_USERNAME") catch |err| {
-        std.debug.print("Error: ATLASSIAN_USERNAME environment variable not set\n", .{});
-        return err;
+    const env_username = std.process.getEnvVarOwned(allocator, "ATLASSIAN_USERNAME") catch null;
+    defer if (env_username) |e| allocator.free(e);
+
+    const username = try config_mod.resolve(allocator, env_username, config.atlassian_username, false) orelse {
+        std.debug.print("Error: ATLASSIAN_USERNAME environment variable not set and no config found.\n", .{});
+        return error.ConfigurationMissing;
     };
     defer allocator.free(username);
 
-    const api_token = std.process.getEnvVarOwned(allocator, "ATLASSIAN_API_TOKEN") catch |err| {
-        std.debug.print("Error: ATLASSIAN_API_TOKEN environment variable not set\n", .{});
-        return err;
+    const env_token = std.process.getEnvVarOwned(allocator, "ATLASSIAN_API_TOKEN") catch null;
+    defer if (env_token) |e| allocator.free(e);
+
+    const api_token = try config_mod.resolve(allocator, env_token, config.atlassian_api_token, false) orelse {
+        std.debug.print("Error: ATLASSIAN_API_TOKEN environment variable not set and no config found.\n", .{});
+        return error.ConfigurationMissing;
     };
     defer allocator.free(api_token);
 
@@ -519,12 +576,14 @@ pub fn main() !void {
 
     // Initialize client
     var client = AtlassianClient.init(allocator, base_url, username, api_token, is_cloud);
+
     defer client.deinit();
 
     // Dispatch to service handler
-    // ConfluenceコマンドにはベースURLを渡してURLを動的に生成
+    // Pass base URL to Confluence command to dynamically generate URL
     switch (service) {
         .jira => try handleJiraCommand(allocator, &client, args[2..]),
         .confluence => try handleConfluenceCommand(allocator, &client, args[2..], base_url),
+        .config => {}, // Handled above
     }
 }

@@ -40,7 +40,7 @@ test "url encode simple string" {
     try std.testing.expectEqualStrings("hello%20world", encoded);
 }
 
-test "url encode japanese" {
+test "url encode japanese characters" {
     const allocator = std.testing.allocator;
     const input = "自己紹介";
     const encoded = try urlEncode(allocator, input);
