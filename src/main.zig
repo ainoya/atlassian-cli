@@ -600,28 +600,29 @@ pub fn main() !void {
             try handleJiraCommand(allocator, &client, args[2..]);
         },
         .confluence => {
-            const confluence_url = if (env_confluence_url) |url|
-                if (url.len > 0) try allocator.dupe(u8, url) else try config_mod.resolve(allocator, env_url, config.atlassian_url, false) orelse {
-                    std.debug.print("Error: CONFLUENCE_URL not set and no ATLASSIAN_URL fallback found.\n", .{});
-                    return error.ConfigurationMissing;
+            const confluence_url = blk: {
+                if (env_confluence_url) |url| {
+                    if (url.len > 0) {
+                        break :blk try allocator.dupe(u8, url);
+                    }
                 }
-            else
-                try config_mod.resolve(allocator, env_url, config.atlassian_url, false) orelse {
+                break :blk try config_mod.resolve(allocator, env_url, config.atlassian_url, false) orelse {
                     std.debug.print("Error: CONFLUENCE_URL not set and no ATLASSIAN_URL fallback found.\n", .{});
                     return error.ConfigurationMissing;
                 };
+            };
             defer allocator.free(confluence_url);
 
-            const confluence_username = if (env_confluence_username) |value|
-                if (value.len > 0) try allocator.dupe(u8, value) else try allocator.dupe(u8, username)
+            const confluence_username = try allocator.dupe(u8, if (env_confluence_username) |value|
+                if (value.len > 0) value else username
             else
-                try allocator.dupe(u8, username);
+                username);
             defer allocator.free(confluence_username);
 
-            const confluence_api_token = if (env_confluence_token) |value|
-                if (value.len > 0) try allocator.dupe(u8, value) else try allocator.dupe(u8, api_token)
+            const confluence_api_token = try allocator.dupe(u8, if (env_confluence_token) |value|
+                if (value.len > 0) value else api_token
             else
-                try allocator.dupe(u8, api_token);
+                api_token);
             defer allocator.free(confluence_api_token);
 
             var client = AtlassianClient.init(allocator, confluence_url, confluence_username, confluence_api_token, jira_api_version, is_cloud);
