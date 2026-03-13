@@ -5,6 +5,7 @@ pub const AtlassianClient = struct {
     base_url: []const u8,
     username: []const u8,
     api_token: []const u8,
+    jira_api_version: []const u8,
     http_client: std.http.Client,
     is_cloud: bool,
 
@@ -13,6 +14,7 @@ pub const AtlassianClient = struct {
         base_url: []const u8,
         username: []const u8,
         api_token: []const u8,
+        jira_api_version: []const u8,
         is_cloud: bool,
     ) AtlassianClient {
         return .{
@@ -20,6 +22,7 @@ pub const AtlassianClient = struct {
             .base_url = base_url,
             .username = username,
             .api_token = api_token,
+            .jira_api_version = jira_api_version,
             .http_client = std.http.Client{ .allocator = allocator },
             .is_cloud = is_cloud,
         };
@@ -27,6 +30,10 @@ pub const AtlassianClient = struct {
 
     pub fn deinit(self: *AtlassianClient) void {
         self.http_client.deinit();
+    }
+
+    fn printStatus(status: std.http.Status) void {
+        std.debug.print("HTTP Error: {d} {s}\n", .{ @intFromEnum(status), @tagName(status) });
     }
 
     /// Create Basic Auth header value (base64 encoded username:token)
@@ -79,21 +86,24 @@ pub const AtlassianClient = struct {
         });
 
         switch (response.status) {
-            .ok => {},
+            .ok, .created, .accepted, .no_content => {},
             .unauthorized => {
-                std.debug.print("Authentication failed. Check ATLASSIAN_USERNAME and ATLASSIAN_API_TOKEN\n", .{});
+                std.debug.print("Authentication failed. Check the configured username and API token\n", .{});
+                printStatus(response.status);
                 return error.AuthenticationFailed;
             },
             .forbidden => {
                 std.debug.print("Permission denied. Check user permissions\n", .{});
+                printStatus(response.status);
                 return error.PermissionDenied;
             },
             .not_found => {
                 std.debug.print("Resource not found\n", .{});
+                printStatus(response.status);
                 return error.NotFound;
             },
             else => {
-                std.debug.print("HTTP Error: {}\n", .{response.status});
+                printStatus(response.status);
                 return error.HttpError;
             },
         }
@@ -109,6 +119,7 @@ test "create auth header" {
         "https://test.atlassian.net",
         "test@example.com",
         "test_token",
+        "3",
         true,
     );
     defer client.deinit();

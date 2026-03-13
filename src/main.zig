@@ -50,10 +50,14 @@ fn printHelp() !void {
         \\  config        Configuration management
         \\
         \\Environment Variables (required if not set in config):
-        \\  ATLASSIAN_URL            Your Atlassian instance URL (e.g., https://your-domain.atlassian.net)
+        \\  ATLASSIAN_URL            Jira instance URL (e.g., https://your-domain.atlassian.net)
         \\  ATLASSIAN_USERNAME       Your email address
         \\  ATLASSIAN_API_TOKEN      Your API token
         \\  ATLASSIAN_CLOUD          Set to 'true' for Cloud, 'false' for Server/DC (default: true)
+        \\  ATLASSIAN_JIRA_API_VERSION Override Jira REST API version (e.g. 2, 3, latest)
+        \\  CONFLUENCE_URL           Confluence base URL (falls back to ATLASSIAN_URL if unset)
+        \\  CONFLUENCE_USERNAME      Confluence username/email (falls back to ATLASSIAN_USERNAME)
+        \\  CONFLUENCE_API_TOKEN     Confluence API token/password (falls back to ATLASSIAN_API_TOKEN)
         \\  CONFLUENCE_BASE_PATH     Confluence API base path (default: /wiki)
         \\
         \\Common Options:
@@ -334,7 +338,7 @@ fn handleConfluenceCommand(allocator: std.mem.Allocator, client: *AtlassianClien
 
             if (output_format == .text) {
                 // Pass base URL to formatter to dynamically generate page URL
-                const formatted = try formatter.formatConfluencePage(allocator, response, base_url);
+                const formatted = try formatter.formatConfluencePage(allocator, response, base_url, confluence_base_path);
                 defer allocator.free(formatted);
                 std.debug.print("{s}", .{formatted});
             } else {
@@ -354,7 +358,7 @@ fn handleConfluenceCommand(allocator: std.mem.Allocator, client: *AtlassianClien
             defer allocator.free(response);
 
             if (output_format == .text) {
-                const formatted = try formatter.formatConfluenceSearchResults(allocator, response, show_full_content);
+                const formatted = try formatter.formatConfluenceSearchResults(allocator, response, base_url, confluence_base_path, show_full_content);
                 defer allocator.free(formatted);
                 std.debug.print("{s}", .{formatted});
             } else {
@@ -374,7 +378,7 @@ fn handleConfluenceCommand(allocator: std.mem.Allocator, client: *AtlassianClien
             defer allocator.free(response);
 
             if (output_format == .text) {
-                const formatted = try formatter.formatConfluenceSearchResults(allocator, response, show_full_content);
+                const formatted = try formatter.formatConfluenceSearchResults(allocator, response, base_url, confluence_base_path, show_full_content);
                 defer allocator.free(formatted);
                 std.debug.print("{s}", .{formatted});
             } else {
@@ -426,7 +430,7 @@ fn handleConfluenceCommand(allocator: std.mem.Allocator, client: *AtlassianClien
             defer allocator.free(response);
 
             if (output_format == .text) {
-                const formatted = try formatter.formatConfluenceSearchResults(allocator, response, show_full_content);
+                const formatted = try formatter.formatConfluenceSearchResults(allocator, response, base_url, confluence_base_path, show_full_content);
                 defer allocator.free(formatted);
                 std.debug.print("{s}", .{formatted});
             } else {
@@ -539,21 +543,17 @@ pub fn main() !void {
     }
 
     // Get environment variables or config
-    // Helper to get optional env var
     const env_url = std.process.getEnvVarOwned(allocator, "ATLASSIAN_URL") catch alias: {
         break :alias null;
     };
     defer if (env_url) |e| allocator.free(e);
-
-    const base_url = try config_mod.resolve(allocator, env_url, config.atlassian_url, false) orelse {
-        std.debug.print("Error: ATLASSIAN_URL environment variable not set and no config found.\n", .{});
-        std.debug.print("Example: export ATLASSIAN_URL=https://your-domain.atlassian.net\n", .{});
-        return error.ConfigurationMissing;
-    };
-    defer allocator.free(base_url);
+    const env_confluence_url = std.process.getEnvVarOwned(allocator, "CONFLUENCE_URL") catch null;
+    defer if (env_confluence_url) |e| allocator.free(e);
 
     const env_username = std.process.getEnvVarOwned(allocator, "ATLASSIAN_USERNAME") catch null;
     defer if (env_username) |e| allocator.free(e);
+    const env_confluence_username = std.process.getEnvVarOwned(allocator, "CONFLUENCE_USERNAME") catch null;
+    defer if (env_confluence_username) |e| allocator.free(e);
 
     const username = try config_mod.resolve(allocator, env_username, config.atlassian_username, false) orelse {
         std.debug.print("Error: ATLASSIAN_USERNAME environment variable not set and no config found.\n", .{});
@@ -563,6 +563,8 @@ pub fn main() !void {
 
     const env_token = std.process.getEnvVarOwned(allocator, "ATLASSIAN_API_TOKEN") catch null;
     defer if (env_token) |e| allocator.free(e);
+    const env_confluence_token = std.process.getEnvVarOwned(allocator, "CONFLUENCE_API_TOKEN") catch null;
+    defer if (env_confluence_token) |e| allocator.free(e);
 
     const api_token = try config_mod.resolve(allocator, env_token, config.atlassian_api_token, false) orelse {
         std.debug.print("Error: ATLASSIAN_API_TOKEN environment variable not set and no config found.\n", .{});
@@ -574,16 +576,59 @@ pub fn main() !void {
     defer if (!std.mem.eql(u8, is_cloud_str, "true")) allocator.free(is_cloud_str);
     const is_cloud = std.mem.eql(u8, is_cloud_str, "true");
 
-    // Initialize client
-    var client = AtlassianClient.init(allocator, base_url, username, api_token, is_cloud);
+    const env_jira_api_version = std.process.getEnvVarOwned(allocator, "ATLASSIAN_JIRA_API_VERSION") catch null;
+    defer if (env_jira_api_version) |e| allocator.free(e);
 
-    defer client.deinit();
+    const jira_api_version = if (env_jira_api_version) |version|
+        if (version.len > 0) try allocator.dupe(u8, version) else try allocator.dupe(u8, if (is_cloud) "3" else "2")
+    else
+        try allocator.dupe(u8, if (is_cloud) "3" else "2");
+    defer allocator.free(jira_api_version);
 
-    // Dispatch to service handler
-    // Pass base URL to Confluence command to dynamically generate URL
     switch (service) {
-        .jira => try handleJiraCommand(allocator, &client, args[2..]),
-        .confluence => try handleConfluenceCommand(allocator, &client, args[2..], base_url),
+        .jira => {
+            const jira_url = try config_mod.resolve(allocator, env_url, config.atlassian_url, false) orelse {
+                std.debug.print("Error: ATLASSIAN_URL environment variable not set and no config found.\n", .{});
+                std.debug.print("Example: export ATLASSIAN_URL=https://your-domain.atlassian.net\n", .{});
+                return error.ConfigurationMissing;
+            };
+            defer allocator.free(jira_url);
+
+            var client = AtlassianClient.init(allocator, jira_url, username, api_token, jira_api_version, is_cloud);
+            defer client.deinit();
+
+            try handleJiraCommand(allocator, &client, args[2..]);
+        },
+        .confluence => {
+            const confluence_url = if (env_confluence_url) |url|
+                if (url.len > 0) try allocator.dupe(u8, url) else try config_mod.resolve(allocator, env_url, config.atlassian_url, false) orelse {
+                    std.debug.print("Error: CONFLUENCE_URL not set and no ATLASSIAN_URL fallback found.\n", .{});
+                    return error.ConfigurationMissing;
+                }
+            else
+                try config_mod.resolve(allocator, env_url, config.atlassian_url, false) orelse {
+                    std.debug.print("Error: CONFLUENCE_URL not set and no ATLASSIAN_URL fallback found.\n", .{});
+                    return error.ConfigurationMissing;
+                };
+            defer allocator.free(confluence_url);
+
+            const confluence_username = if (env_confluence_username) |value|
+                if (value.len > 0) try allocator.dupe(u8, value) else try allocator.dupe(u8, username)
+            else
+                try allocator.dupe(u8, username);
+            defer allocator.free(confluence_username);
+
+            const confluence_api_token = if (env_confluence_token) |value|
+                if (value.len > 0) try allocator.dupe(u8, value) else try allocator.dupe(u8, api_token)
+            else
+                try allocator.dupe(u8, api_token);
+            defer allocator.free(confluence_api_token);
+
+            var client = AtlassianClient.init(allocator, confluence_url, confluence_username, confluence_api_token, jira_api_version, is_cloud);
+            defer client.deinit();
+
+            try handleConfluenceCommand(allocator, &client, args[2..], confluence_url);
+        },
         .config => {}, // Handled above
     }
 }

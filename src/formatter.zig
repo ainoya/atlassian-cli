@@ -5,6 +5,63 @@ pub const OutputFormat = enum {
     json,
 };
 
+fn confluenceUrlPrefix(base_path: []const u8) []const u8 {
+    if (base_path.len == 0 or std.mem.eql(u8, base_path, "/")) return "";
+    return if (base_path[base_path.len - 1] == '/') base_path[0 .. base_path.len - 1] else base_path;
+}
+
+fn appendJiraDocText(allocator: std.mem.Allocator, output: *std.ArrayList(u8), value: std.json.Value) !void {
+    switch (value) {
+        .string => |text| try output.appendSlice(allocator, text),
+        .array => |items| {
+            for (items.items) |item| {
+                try appendJiraDocText(allocator, output, item);
+            }
+        },
+        .object => |obj| {
+            if (obj.get("text")) |text| {
+                try appendJiraDocText(allocator, output, text);
+            }
+
+            if (obj.get("content")) |content| {
+                const before_len = output.items.len;
+                try appendJiraDocText(allocator, output, content);
+
+                if (obj.get("type")) |node_type| {
+                    if (node_type == .string) {
+                        const needs_separator = !std.mem.eql(u8, node_type.string, "text") and
+                            output.items.len > before_len and
+                            output.items[output.items.len - 1] != '\n';
+                        if (needs_separator) {
+                            try output.append(allocator, '\n');
+                        }
+                    }
+                }
+            }
+        },
+        else => {},
+    }
+}
+
+fn renderJiraDescription(allocator: std.mem.Allocator, value: std.json.Value) ![]u8 {
+    switch (value) {
+        .null => return try allocator.dupe(u8, ""),
+        .string => |text| return try allocator.dupe(u8, text),
+        else => {
+            var output = try std.ArrayList(u8).initCapacity(allocator, 256);
+            errdefer output.deinit(allocator);
+
+            try appendJiraDocText(allocator, &output, value);
+
+            const raw_text = try output.toOwnedSlice(allocator);
+            defer allocator.free(raw_text);
+
+            const cleaned = try cleanWhitespace(allocator, raw_text);
+            return cleaned;
+        },
+    }
+}
+
 /// Simple HTML tag stripper - removes HTML tags and decodes basic entities
 fn stripHtmlTags(allocator: std.mem.Allocator, html: []const u8) ![]u8 {
     var result = std.ArrayList(u8).initCapacity(allocator, html.len) catch return try allocator.dupe(u8, html);
@@ -83,7 +140,13 @@ fn cleanWhitespace(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
 }
 
 /// Format Confluence search results as readable text
-pub fn formatConfluenceSearchResults(allocator: std.mem.Allocator, json_str: []const u8, show_full_content: bool) ![]u8 {
+pub fn formatConfluenceSearchResults(
+    allocator: std.mem.Allocator,
+    json_str: []const u8,
+    base_url: []const u8,
+    base_path: []const u8,
+    show_full_content: bool,
+) ![]u8 {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
     defer parsed.deinit();
 
@@ -93,6 +156,7 @@ pub fn formatConfluenceSearchResults(allocator: std.mem.Allocator, json_str: []c
     var output = try std.ArrayList(u8).initCapacity(allocator, 1024);
     errdefer output.deinit(allocator);
     const writer = output.writer(allocator);
+    const url_prefix = confluenceUrlPrefix(base_path);
 
     const results_array = results.array;
     try writer.print("Found {} result(s):\n\n", .{results_array.items.len});
@@ -132,7 +196,7 @@ pub fn formatConfluenceSearchResults(allocator: std.mem.Allocator, json_str: []c
             if (obj.get("space")) |space| {
                 const space_obj = space.object;
                 if (space_obj.get("key")) |key| {
-                    try writer.print("    URL: https://.atlassian.net/wiki/spaces/{s}/pages/{s}\n", .{ key.string, page_id });
+                    try writer.print("    URL: {s}{s}/spaces/{s}/pages/{s}\n", .{ base_url, url_prefix, key.string, page_id });
                 }
             }
         }
@@ -339,18 +403,58 @@ pub fn formatJiraIssue(allocator: std.mem.Allocator, json_str: []const u8) ![]u8
     // Description
     if (fields_obj.get("description")) |description| {
         if (description != .null) {
+            const rendered_description = try renderJiraDescription(allocator, description);
+            defer allocator.free(rendered_description);
+
             try writer.writeAll("\nDescription:\n");
             try writer.writeAll("─────────────────────────────────────────\n");
-            try writer.print("{s}\n", .{description.string});
+            try writer.print("{s}\n", .{rendered_description});
         }
     }
 
     return output.toOwnedSlice(allocator);
 }
 
+test "formatJiraIssue handles Atlassian document format description" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "key": "VSM-5743",
+        \\  "fields": {
+        \\    "summary": "Investigate formatter failure",
+        \\    "status": { "name": "In Progress" },
+        \\    "description": {
+        \\      "type": "doc",
+        \\      "version": 1,
+        \\      "content": [
+        \\        {
+        \\          "type": "paragraph",
+        \\          "content": [
+        \\            { "type": "text", "text": "First line." }
+        \\          ]
+        \\        },
+        \\        {
+        \\          "type": "paragraph",
+        \\          "content": [
+        \\            { "type": "text", "text": "Second line." }
+        \\          ]
+        \\        }
+        \\      ]
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const formatted = try formatJiraIssue(allocator, json);
+    defer allocator.free(formatted);
+
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "Issue: VSM-5743") != null);
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "First line. Second line.") != null);
+}
+
 /// Format Confluence page as readable text
 /// base_url: Atlassian base URL (e.g. https://your-domain.atlassian.net)
-pub fn formatConfluencePage(allocator: std.mem.Allocator, json_str: []const u8, base_url: []const u8) ![]u8 {
+pub fn formatConfluencePage(allocator: std.mem.Allocator, json_str: []const u8, base_url: []const u8, base_path: []const u8) ![]u8 {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
     defer parsed.deinit();
 
@@ -359,6 +463,7 @@ pub fn formatConfluencePage(allocator: std.mem.Allocator, json_str: []const u8, 
     var output = try std.ArrayList(u8).initCapacity(allocator, 1024);
     errdefer output.deinit(allocator);
     const writer = output.writer(allocator);
+    const url_prefix = confluenceUrlPrefix(base_path);
 
     // Title
     const title = if (root.get("title")) |t| t.string else "Untitled";
@@ -397,7 +502,7 @@ pub fn formatConfluencePage(allocator: std.mem.Allocator, json_str: []const u8, 
             const space_obj = space.object;
             if (space_obj.get("key")) |key| {
                 // Dynamically generate Confluence page URL from base URL
-                try writer.print("URL: {s}/wiki/spaces/{s}/pages/{s}\n", .{ base_url, key.string, page_id });
+                try writer.print("URL: {s}{s}/spaces/{s}/pages/{s}\n", .{ base_url, url_prefix, key.string, page_id });
             }
         }
     }

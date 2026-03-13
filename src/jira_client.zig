@@ -13,6 +13,21 @@ pub const JiraClient = struct {
         };
     }
 
+    fn apiVersion(self: *const JiraClient) []const u8 {
+        return self.client.jira_api_version;
+    }
+
+    fn writeApiPath(self: *const JiraClient, buffer: []u8, suffix: []const u8) ![]const u8 {
+        return try std.fmt.bufPrint(buffer, "/rest/api/{s}{s}", .{ self.apiVersion(), suffix });
+    }
+
+    fn writeSearchEndpoint(self: *const JiraClient, buffer: []u8) ![]const u8 {
+        return if (self.client.is_cloud and std.mem.eql(u8, self.apiVersion(), "3"))
+            "/rest/api/3/search/jql"
+        else
+            try self.writeApiPath(buffer, "/search");
+    }
+
     /// Get issue by key (e.g., "PROJECT-123")
     pub fn getIssue(self: *JiraClient, issue_key: []const u8, fields: ?[]const u8) ![]u8 {
         var params_buffer: [1024]u8 = undefined;
@@ -22,7 +37,7 @@ pub const JiraClient = struct {
             "fields=summary,description,status,assignee,reporter,labels,priority,created,updated,issuetype";
 
         var endpoint_buffer: [256]u8 = undefined;
-        const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "/rest/api/3/issue/{s}", .{issue_key});
+        const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "/rest/api/{s}/issue/{s}", .{ self.apiVersion(), issue_key });
 
         return try self.client.makeRequest(.GET, endpoint, params);
     }
@@ -47,13 +62,15 @@ pub const JiraClient = struct {
 
         try writer.print("&maxResults={d}", .{max_results});
 
-        const endpoint = "/rest/api/3/search/jql";
+        var endpoint_buffer: [256]u8 = undefined;
+        const endpoint = try self.writeSearchEndpoint(&endpoint_buffer);
         return try self.client.makeRequest(.GET, endpoint, stream.getWritten());
     }
 
     /// Get all projects
     pub fn getProjects(self: *JiraClient) ![]u8 {
-        const endpoint = "/rest/api/3/project";
+        var endpoint_buffer: [256]u8 = undefined;
+        const endpoint = try self.writeApiPath(&endpoint_buffer, "/project");
         return try self.client.makeRequest(.GET, endpoint, null);
     }
 
@@ -67,14 +84,14 @@ pub const JiraClient = struct {
     /// Get issue transitions (workflow states)
     pub fn getTransitions(self: *JiraClient, issue_key: []const u8) ![]u8 {
         var endpoint_buffer: [256]u8 = undefined;
-        const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "/rest/api/3/issue/{s}/transitions", .{issue_key});
+        const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "/rest/api/{s}/issue/{s}/transitions", .{ self.apiVersion(), issue_key });
         return try self.client.makeRequest(.GET, endpoint, null);
     }
 
     /// Get issue comments
     pub fn getComments(self: *JiraClient, issue_key: []const u8) ![]u8 {
         var endpoint_buffer: [256]u8 = undefined;
-        const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "/rest/api/3/issue/{s}/comment", .{issue_key});
+        const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "/rest/api/{s}/issue/{s}/comment", .{ self.apiVersion(), issue_key });
         return try self.client.makeRequest(.GET, endpoint, null);
     }
 
@@ -117,7 +134,48 @@ pub const JiraClient = struct {
 
     /// Get current user profile
     pub fn getCurrentUser(self: *JiraClient) ![]u8 {
-        const endpoint = if (self.client.is_cloud) "/rest/api/3/myself" else "/rest/api/2/myself";
+        var endpoint_buffer: [256]u8 = undefined;
+        const endpoint = try self.writeApiPath(&endpoint_buffer, "/myself");
         return try self.client.makeRequest(.GET, endpoint, null);
     }
 };
+
+test "jira client chooses server endpoints when cloud is disabled" {
+    const allocator = std.testing.allocator;
+
+    var client = AtlassianClient.init(
+        allocator,
+        "https://jira.example.com",
+        "user",
+        "token",
+        "2",
+        false,
+    );
+    defer client.deinit();
+
+    var jira = JiraClient.init(&client, allocator);
+
+    try std.testing.expectEqualStrings("2", jira.apiVersion());
+}
+
+test "jira client allows latest api version override" {
+    const allocator = std.testing.allocator;
+
+    var client = AtlassianClient.init(
+        allocator,
+        "https://jira.example.com",
+        "user",
+        "token",
+        "latest",
+        false,
+    );
+    defer client.deinit();
+
+    var jira = JiraClient.init(&client, allocator);
+
+    var path_buffer: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("/rest/api/latest", try jira.writeApiPath(&path_buffer, ""));
+
+    var search_buffer: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("/rest/api/latest/search", try jira.writeSearchEndpoint(&search_buffer));
+}
