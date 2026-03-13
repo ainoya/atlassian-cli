@@ -11,12 +11,18 @@ This skill enables you to search and retrieve information from Jira and Confluen
 
 Before using this skill, ensure:
 1. Environment variables are set:
-   - `ATLASSIAN_URL`: Your Atlassian instance URL (e.g., `https://your-domain.atlassian.net`)
+   - `ATLASSIAN_URL`: Jira instance URL (e.g., `https://your-domain.atlassian.net`)
    - `ATLASSIAN_USERNAME`: Your email address
    - `ATLASSIAN_API_TOKEN`: Your API token
    - `ATLASSIAN_CLOUD`: Set to `true` for Cloud, `false` for Server/DC (default: true)
+   - `ATLASSIAN_JIRA_API_VERSION`: Optional Jira REST API version override (`2`, `3`, or `latest`)
+   - `CONFLUENCE_URL`: Optional separate Confluence host; falls back to `ATLASSIAN_URL`
+   - `CONFLUENCE_USERNAME`: Optional separate Confluence username; falls back to `ATLASSIAN_USERNAME`
+   - `CONFLUENCE_API_TOKEN`: Optional separate Confluence token; falls back to `ATLASSIAN_API_TOKEN`
    - `CONFLUENCE_BASE_PATH`: Confluence API base path (default: `/wiki`)
 2. The `atlassian-cli` binary is built and available in PATH
+
+For split Jira/Confluence deployments, prefer setting the Confluence-specific variables explicitly.
 
 ## Available Commands
 
@@ -379,6 +385,7 @@ atlassian-cli jira search "updated >= -3d AND project=MYPROJECT" --max=30
    - Verify your API token is valid
    - Check that username (email) is correct
    - Ensure token has not expired
+   - For Confluence, verify `CONFLUENCE_USERNAME` / `CONFLUENCE_API_TOKEN` if it uses separate credentials
 
 3. **"Permission denied"**
    - You don't have access to the requested resource
@@ -393,7 +400,11 @@ atlassian-cli jira search "updated >= -3d AND project=MYPROJECT" --max=30
 5. **"Connection error"**
    - Check network connectivity
    - Verify ATLASSIAN_URL is correct (include https://)
-   - For Confluence, ensure CONFLUENCE_BASE_PATH is set correctly (default: `/wiki`)
+   - For Confluence, verify `CONFLUENCE_URL` and `CONFLUENCE_BASE_PATH`
+
+6. **Jira Server/DC returns not found for issue/search endpoints**
+   - Set `ATLASSIAN_CLOUD=false`
+   - If needed, set `ATLASSIAN_JIRA_API_VERSION=2` or `ATLASSIAN_JIRA_API_VERSION=latest`
 
 ## Limitations
 
