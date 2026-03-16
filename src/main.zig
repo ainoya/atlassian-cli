@@ -181,10 +181,16 @@ fn expandConfluenceLink(
     };
 
     // Fetch and display
-    const page_response = confluence.getPage(page_id) catch return;
+    const page_response = confluence.getPage(page_id) catch |err| {
+        std.debug.print("Warning: failed to fetch Confluence page {s}: {}\n", .{ page_id, err });
+        return;
+    };
     defer allocator.free(page_response);
 
-    const page_formatted = formatter.formatConfluencePage(allocator, page_response, base_url) catch return;
+    const page_formatted = formatter.formatConfluencePage(allocator, page_response, base_url) catch |err| {
+        std.debug.print("Warning: failed to format Confluence page {s}: {}\n", .{ page_id, err });
+        return;
+    };
     defer allocator.free(page_formatted);
 
     std.debug.print("\n── Linked: {s} ──\n\n{s}", .{ url, page_formatted });

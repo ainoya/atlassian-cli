@@ -837,7 +837,7 @@ pub fn extractConfluencePageId(url: []const u8) ?[]const u8 {
     const pos = std.mem.indexOf(u8, url, marker) orelse return null;
     const start = pos + marker.len;
     var end = start;
-    while (end < url.len and url[end] >= '0' and url[end] <= '9') : (end += 1) {}
+    while (end < url.len and std.ascii.isDigit(url[end])) : (end += 1) {}
     if (end == start) return null;
     return url[start..end];
 }
