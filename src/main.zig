@@ -192,7 +192,8 @@ fn handleJiraCommand(allocator: std.mem.Allocator, client: *AtlassianClient, arg
                 std.debug.print("Usage: jira issue <issue-key> [--format=text|json]\n", .{});
                 return;
             }
-            const issue_fields: ?[]const u8 = if (output_format == .json) "summary,description,status,assignee,reporter,labels,priority,created,updated,issuetype,comment" else null;
+            const json_issue_fields = "summary,description,status,assignee,reporter,labels,priority,created,updated,issuetype,comment";
+            const issue_fields: ?[]const u8 = if (output_format == .json) json_issue_fields else null;
             const response = try jira.getIssue(args[1], issue_fields);
             defer allocator.free(response);
 
