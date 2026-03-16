@@ -714,3 +714,130 @@ pub fn formatGenericList(allocator: std.mem.Allocator, json_str: []const u8, ite
 
     return try allocator.dupe(u8, "No items found.\n");
 }
+
+/// Extract all URLs from an ADF (Atlassian Document Format) node.
+/// Returns owned copies of URL strings; caller must free each element and the slice.
+pub fn extractAdfUrls(allocator: std.mem.Allocator, node: std.json.Value) ![][]u8 {
+    var urls = try std.ArrayList([]u8).initCapacity(allocator, 4);
+    errdefer {
+        for (urls.items) |url| allocator.free(url);
+        urls.deinit(allocator);
+    }
+
+    const max_stack = 64;
+    var stack: [max_stack]struct { items: []const std.json.Value, idx: usize } = undefined;
+    var depth: usize = 0;
+
+    if (node != .object) return try urls.toOwnedSlice(allocator);
+    const root_content = node.object.get("content") orelse return try urls.toOwnedSlice(allocator);
+    if (root_content != .array) return try urls.toOwnedSlice(allocator);
+    stack[0] = .{ .items = root_content.array.items, .idx = 0 };
+    depth = 1;
+
+    while (depth > 0) {
+        const frame = &stack[depth - 1];
+        if (frame.idx >= frame.items.len) {
+            depth -= 1;
+            continue;
+        }
+        const child = frame.items[frame.idx];
+        frame.idx += 1;
+
+        if (child != .object) continue;
+        const obj = child.object;
+
+        // embedCard / inlineCard → attrs.url
+        const nt = if (obj.get("type")) |t| if (t == .string) t.string else null else null;
+        if (nt) |node_type| {
+            if (std.mem.eql(u8, node_type, "embedCard") or std.mem.eql(u8, node_type, "inlineCard")) {
+                if (obj.get("attrs")) |attrs| {
+                    if (attrs == .object) {
+                        if (attrs.object.get("url")) |url| {
+                            if (url == .string) {
+                                try urls.append(allocator, try allocator.dupe(u8, url.string));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Text nodes with link marks → attrs.href
+        if (obj.get("marks")) |marks_val| {
+            if (marks_val == .array) {
+                for (marks_val.array.items) |mark| {
+                    if (mark != .object) continue;
+                    const mt = if (mark.object.get("type")) |t| if (t == .string) t.string else null else null;
+                    if (mt) |mark_type| {
+                        if (std.mem.eql(u8, mark_type, "link")) {
+                            if (mark.object.get("attrs")) |attrs| {
+                                if (attrs == .object) {
+                                    if (attrs.object.get("href")) |href| {
+                                        if (href == .string) {
+                                            try urls.append(allocator, try allocator.dupe(u8, href.string));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Push children
+        if (obj.get("content")) |content_val| {
+            if (content_val == .array and depth < max_stack) {
+                stack[depth] = .{ .items = content_val.array.items, .idx = 0 };
+                depth += 1;
+            }
+        }
+    }
+
+    return try urls.toOwnedSlice(allocator);
+}
+
+/// Extract all href URLs from HTML content (e.g., Confluence storage format).
+/// Returns owned copies of URL strings; caller must free each element and the slice.
+pub fn extractHtmlUrls(allocator: std.mem.Allocator, html: []const u8) ![][]u8 {
+    var urls = try std.ArrayList([]u8).initCapacity(allocator, 8);
+    errdefer {
+        for (urls.items) |url| allocator.free(url);
+        urls.deinit(allocator);
+    }
+
+    var i: usize = 0;
+    while (i < html.len) {
+        if (html[i] == '<') {
+            const close = std.mem.indexOfScalarPos(u8, html, i + 1, '>') orelse {
+                i += 1;
+                continue;
+            };
+            const tag_inner = html[i + 1 .. close];
+            const trimmed = std.mem.trimLeft(u8, tag_inner, " \t\n\r");
+            if (trimmed.len > 0 and trimmed[0] == 'a' and
+                (trimmed.len == 1 or trimmed[1] == ' ' or trimmed[1] == '\t' or trimmed[1] == '\n'))
+            {
+                if (extractHtmlAttr(tag_inner, "href")) |href| {
+                    try urls.append(allocator, try allocator.dupe(u8, href));
+                }
+            }
+            i = close + 1;
+        } else {
+            i += 1;
+        }
+    }
+
+    return try urls.toOwnedSlice(allocator);
+}
+
+/// Extract Confluence page ID from a URL like .../wiki/spaces/X/pages/12345/Title
+pub fn extractConfluencePageId(url: []const u8) ?[]const u8 {
+    const marker = "/pages/";
+    const pos = std.mem.indexOf(u8, url, marker) orelse return null;
+    const start = pos + marker.len;
+    var end = start;
+    while (end < url.len and url[end] >= '0' and url[end] <= '9') : (end += 1) {}
+    if (end == start) return null;
+    return url[start..end];
+}

@@ -60,6 +60,7 @@ fn printHelp() !void {
         \\  --format=text            Output format: text (default) or json
         \\  --format=json            Raw JSON output
         \\  --full-content           Show full content (default shows preview only)
+        \\  --expand-links[=N]       Fetch linked Confluence pages inline (N=depth, default 1)
         \\
         \\Jira Commands:
         \\  issue <key>                        Get issue details (e.g., PROJECT-123)
@@ -142,6 +143,77 @@ fn hasFullContentFlag(args: []const [:0]const u8) bool {
     return false;
 }
 
+/// Parse --expand-links or --expand-links=N flag. Returns null if absent, depth otherwise.
+fn parseExpandLinksDepth(args: []const [:0]const u8) ?usize {
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--expand-links")) {
+            return 1;
+        }
+        if (std.mem.startsWith(u8, arg, "--expand-links=")) {
+            return std.fmt.parseInt(usize, arg["--expand-links=".len..], 10) catch 1;
+        }
+    }
+    return null;
+}
+
+/// Recursively fetch and display a linked Confluence page and its children.
+fn expandConfluenceLink(
+    allocator: std.mem.Allocator,
+    confluence: *ConfluenceClient,
+    base_url: []const u8,
+    url: []const u8,
+    page_id: []const u8,
+    remaining_depth: usize,
+    visited: *std.ArrayList([]u8),
+) void {
+    if (remaining_depth == 0) return;
+
+    // Check if already visited
+    for (visited.items) |id| {
+        if (std.mem.eql(u8, id, page_id)) return;
+    }
+
+    // Mark as visited
+    const owned_id = allocator.dupe(u8, page_id) catch return;
+    visited.append(allocator, owned_id) catch {
+        allocator.free(owned_id);
+        return;
+    };
+
+    // Fetch and display
+    const page_response = confluence.getPage(page_id) catch return;
+    defer allocator.free(page_response);
+
+    const page_formatted = formatter.formatConfluencePage(allocator, page_response, base_url) catch return;
+    defer allocator.free(page_formatted);
+
+    std.debug.print("\n── Linked: {s} ──\n\n{s}", .{ url, page_formatted });
+
+    if (remaining_depth <= 1) return;
+
+    // Extract child URLs from page HTML content and recurse
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, page_response, .{}) catch return;
+    defer parsed.deinit();
+
+    const body = if (parsed.value.object.get("body")) |b| b else return;
+    if (body != .object) return;
+    const storage = if (body.object.get("storage")) |s| s else return;
+    if (storage != .object) return;
+    const value = if (storage.object.get("value")) |v| v else return;
+    if (value != .string) return;
+
+    const child_urls = formatter.extractHtmlUrls(allocator, value.string) catch return;
+    defer {
+        for (child_urls) |u| allocator.free(u);
+        allocator.free(child_urls);
+    }
+
+    for (child_urls) |child_url| {
+        const child_page_id = formatter.extractConfluencePageId(child_url) orelse continue;
+        expandConfluenceLink(allocator, confluence, base_url, child_url, child_page_id, remaining_depth - 1, visited);
+    }
+}
+
 fn printConfluenceHelp() !void {
     const help =
         \\Confluence Commands:
@@ -167,7 +239,7 @@ fn printConfluenceHelp() !void {
     std.debug.print("{s}\n", .{help});
 }
 
-fn handleJiraCommand(allocator: std.mem.Allocator, client: *AtlassianClient, args: []const [:0]const u8) !void {
+fn handleJiraCommand(allocator: std.mem.Allocator, client: *AtlassianClient, args: []const [:0]const u8, base_url: []const u8) !void {
     if (args.len < 1) {
         try printJiraHelp();
         return;
@@ -186,7 +258,7 @@ fn handleJiraCommand(allocator: std.mem.Allocator, client: *AtlassianClient, arg
         .help => try printJiraHelp(),
         .issue => {
             if (args.len < 2) {
-                std.debug.print("Usage: jira issue <issue-key> [--format=text|json]\n", .{});
+                std.debug.print("Usage: jira issue <issue-key> [--format=text|json] [--expand-links[=N]]\n", .{});
                 return;
             }
             const response = try jira.getIssue(args[1], null);
@@ -196,6 +268,37 @@ fn handleJiraCommand(allocator: std.mem.Allocator, client: *AtlassianClient, arg
                 const formatted = try formatter.formatJiraIssue(allocator, response);
                 defer allocator.free(formatted);
                 std.debug.print("{s}", .{formatted});
+
+                // Recursively expand linked Confluence pages
+                if (parseExpandLinksDepth(args)) |depth| {
+                    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+                    defer parsed.deinit();
+
+                    const fields = parsed.value.object.get("fields") orelse return;
+                    const description = fields.object.get("description") orelse return;
+                    if (description != .object) return;
+
+                    const adf_urls = try formatter.extractAdfUrls(allocator, description);
+                    defer {
+                        for (adf_urls) |url| allocator.free(url);
+                        allocator.free(adf_urls);
+                    }
+
+                    const confluence_base_path = std.process.getEnvVarOwned(allocator, "CONFLUENCE_BASE_PATH") catch "/wiki";
+                    defer if (!std.mem.eql(u8, confluence_base_path, "/wiki")) allocator.free(confluence_base_path);
+                    var confluence = ConfluenceClient.init(client, allocator, confluence_base_path);
+
+                    var visited = try std.ArrayList([]u8).initCapacity(allocator, 16);
+                    defer {
+                        for (visited.items) |id| allocator.free(id);
+                        visited.deinit(allocator);
+                    }
+
+                    for (adf_urls) |url| {
+                        const page_id = formatter.extractConfluencePageId(url) orelse continue;
+                        expandConfluenceLink(allocator, &confluence, base_url, url, page_id, depth, &visited);
+                    }
+                }
             } else {
                 std.debug.print("{s}\n", .{response});
             }
@@ -582,7 +685,7 @@ pub fn main() !void {
     // Dispatch to service handler
     // Pass base URL to Confluence command to dynamically generate URL
     switch (service) {
-        .jira => try handleJiraCommand(allocator, &client, args[2..]),
+        .jira => try handleJiraCommand(allocator, &client, args[2..], base_url),
         .confluence => try handleConfluenceCommand(allocator, &client, args[2..], base_url),
         .config => {}, // Handled above
     }
