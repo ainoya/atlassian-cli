@@ -10,16 +10,16 @@ pub const OutputFormat = enum {
 /// returns "https://example.com" (a slice into tag_inner).
 fn extractHtmlAttr(tag_inner: []const u8, attr_name: []const u8) ?[]const u8 {
     var pos: usize = 0;
-    while (pos + attr_name.len < tag_inner.len) : (pos += 1) {
+    while (pos + attr_name.len <= tag_inner.len) : (pos += 1) {
         if (!std.mem.startsWith(u8, tag_inner[pos..], attr_name)) continue;
         // Must be preceded by whitespace to avoid partial matches (e.g. "data-href")
-        if (pos > 0 and tag_inner[pos - 1] != ' ' and tag_inner[pos - 1] != '\t' and tag_inner[pos - 1] != '\n') continue;
+        if (pos > 0 and !std.ascii.isWhitespace(tag_inner[pos - 1])) continue;
         var p = pos + attr_name.len;
         // Skip optional whitespace around =
-        while (p < tag_inner.len and (tag_inner[p] == ' ' or tag_inner[p] == '\t')) : (p += 1) {}
+        while (p < tag_inner.len and std.ascii.isWhitespace(tag_inner[p])) : (p += 1) {}
         if (p >= tag_inner.len or tag_inner[p] != '=') continue;
         p += 1;
-        while (p < tag_inner.len and (tag_inner[p] == ' ' or tag_inner[p] == '\t')) : (p += 1) {}
+        while (p < tag_inner.len and std.ascii.isWhitespace(tag_inner[p])) : (p += 1) {}
         if (p >= tag_inner.len) continue;
         const quote = tag_inner[p];
         if (quote != '"' and quote != '\'') continue;
@@ -89,7 +89,7 @@ fn stripHtmlTags(allocator: std.mem.Allocator, html: []const u8) ![]u8 {
             } else {
                 // Other tag - add space after for readability
                 if (close + 1 < html.len and html[close + 1] != ' ' and html[close + 1] != '\n') {
-                    result.append(allocator, ' ') catch {};
+                    try result.append(allocator, ' ');
                 }
             }
 
@@ -106,15 +106,15 @@ fn stripHtmlTags(allocator: std.mem.Allocator, html: []const u8) ![]u8 {
                 in_entity = false;
                 const entity = entity_buffer[0..entity_len];
                 if (std.mem.eql(u8, entity, "nbsp")) {
-                    result.append(allocator, ' ') catch {};
+                    try result.append(allocator, ' ');
                 } else if (std.mem.eql(u8, entity, "lt")) {
-                    result.append(allocator, '<') catch {};
+                    try result.append(allocator, '<');
                 } else if (std.mem.eql(u8, entity, "gt")) {
-                    result.append(allocator, '>') catch {};
+                    try result.append(allocator, '>');
                 } else if (std.mem.eql(u8, entity, "amp")) {
-                    result.append(allocator, '&') catch {};
+                    try result.append(allocator, '&');
                 } else if (std.mem.eql(u8, entity, "quot")) {
-                    result.append(allocator, '"') catch {};
+                    try result.append(allocator, '"');
                 } else {
                     // Unknown entity, skip
                 }
@@ -123,7 +123,7 @@ fn stripHtmlTags(allocator: std.mem.Allocator, html: []const u8) ![]u8 {
                 entity_len += 1;
             }
         } else {
-            result.append(allocator, c) catch {};
+            try result.append(allocator, c);
         }
 
         i += 1;
@@ -157,19 +157,22 @@ fn cleanWhitespace(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
 /// Iterative DFS to avoid per-recursion allocations.
 fn writeAdfText(writer: anytype, node: std.json.Value) !void {
     const max_stack = 64;
-    var stack: [max_stack]struct { items: []const std.json.Value, idx: usize } = undefined;
+    var stack: [max_stack]struct { items: []const std.json.Value, idx: usize, is_block: bool } = undefined;
     var depth: usize = 0;
 
     // Seed with the root node's content array
     if (node != .object) return;
     const root_content = node.object.get("content") orelse return;
     if (root_content != .array) return;
-    stack[0] = .{ .items = root_content.array.items, .idx = 0 };
+    stack[0] = .{ .items = root_content.array.items, .idx = 0, .is_block = false };
     depth = 1;
 
     while (depth > 0) {
         const frame = &stack[depth - 1];
         if (frame.idx >= frame.items.len) {
+            if (frame.is_block) {
+                try writer.writeAll("\n");
+            }
             depth -= 1;
             continue;
         }
@@ -248,7 +251,11 @@ fn writeAdfText(writer: anytype, node: std.json.Value) !void {
                                             try writer.writeAll("[image: ");
                                             try writer.writeAll(url.string);
                                             try writer.writeAll("]");
+                                        } else {
+                                            try writer.writeAll("[image]");
                                         }
+                                    } else {
+                                        try writer.writeAll("[image]");
                                     }
                                 } else {
                                     const alt = if (attrs.object.get("alt")) |a| if (a == .string) a.string else null else null;
@@ -270,25 +277,29 @@ fn writeAdfText(writer: anytype, node: std.json.Value) !void {
         // Push child's content array onto stack
         if (obj.get("content")) |content_val| {
             if (content_val == .array and depth < max_stack) {
-                stack[depth] = .{ .items = content_val.array.items, .idx = 0 };
+                // Track whether this is a block-level node so we emit a newline after its children
+                const is_block = if (obj.get("type")) |tv| if (tv == .string) blk: {
+                    const t = tv.string;
+                    break :blk (std.mem.eql(u8, t, "paragraph") or
+                        std.mem.eql(u8, t, "heading") or
+                        std.mem.eql(u8, t, "bulletList") or
+                        std.mem.eql(u8, t, "orderedList") or
+                        std.mem.eql(u8, t, "listItem") or
+                        std.mem.eql(u8, t, "codeBlock") or
+                        std.mem.eql(u8, t, "blockquote") or
+                        std.mem.eql(u8, t, "rule"));
+                } else false else false;
+                stack[depth] = .{ .items = content_val.array.items, .idx = 0, .is_block = is_block };
                 depth += 1;
-                continue; // process children before emitting newline
+                continue;
             }
         }
 
-        // Newline after block-level nodes (only when no children were pushed)
+        // Newline after leaf block-level nodes (no content array)
         if (obj.get("type")) |type_val| {
             if (type_val == .string) {
                 const t = type_val.string;
-                if (std.mem.eql(u8, t, "paragraph") or
-                    std.mem.eql(u8, t, "heading") or
-                    std.mem.eql(u8, t, "bulletList") or
-                    std.mem.eql(u8, t, "orderedList") or
-                    std.mem.eql(u8, t, "listItem") or
-                    std.mem.eql(u8, t, "codeBlock") or
-                    std.mem.eql(u8, t, "blockquote") or
-                    std.mem.eql(u8, t, "rule"))
-                {
+                if (std.mem.eql(u8, t, "rule")) {
                     try writer.writeAll("\n");
                 }
             }
