@@ -714,3 +714,63 @@ pub fn formatGenericList(allocator: std.mem.Allocator, json_str: []const u8, ite
 
     return try allocator.dupe(u8, "No items found.\n");
 }
+
+/// Format Jira issue comments as readable text
+pub fn formatJiraComments(allocator: std.mem.Allocator, json_str: []const u8, issue_key: []const u8) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value.object;
+    const comments = root.get("comments") orelse return try allocator.dupe(u8, "No comments found.\n");
+    const comments_array = comments.array;
+
+    var output = try std.ArrayList(u8).initCapacity(allocator, 1024);
+    errdefer output.deinit(allocator);
+    const writer = output.writer(allocator);
+
+    try writer.print("Comments for {s} ({} comment{s})\n", .{
+        issue_key,
+        comments_array.items.len,
+        if (comments_array.items.len == 1) @as([]const u8, "") else "s",
+    });
+    try writer.writeAll("─────────────────────────────────────────\n");
+
+    for (comments_array.items) |comment| {
+        const obj = comment.object;
+
+        // Date — extract "YYYY-MM-DD HH:MM" from ISO 8601
+        if (obj.get("created")) |created| {
+            if (created == .string) {
+                const s = created.string;
+                if (s.len >= 16) {
+                    try writer.print("{s} {s}", .{ s[0..10], s[11..16] });
+                } else {
+                    try writer.print("{s}", .{s});
+                }
+            }
+        }
+
+        // Author
+        if (obj.get("author")) |author| {
+            if (author == .object) {
+                if (author.object.get("displayName")) |name| {
+                    if (name == .string) {
+                        try writer.print(" \u{2014} {s}", .{name.string});
+                    }
+                }
+            }
+        }
+        try writer.writeAll(":\n");
+
+        // Body (ADF)
+        if (obj.get("body")) |body| {
+            if (body == .object) {
+                try writeAdfText(writer, body);
+            }
+        }
+
+        try writer.writeAll("\n");
+    }
+
+    return output.toOwnedSlice(allocator);
+}
