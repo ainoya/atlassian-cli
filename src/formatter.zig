@@ -5,57 +5,128 @@ pub const OutputFormat = enum {
     json,
 };
 
-/// Simple HTML tag stripper - removes HTML tags and decodes basic entities
+/// Extract the value of an HTML attribute from the inner content of a tag.
+/// E.g., given `a href="https://example.com" class="link"` and "href",
+/// returns "https://example.com" (a slice into tag_inner).
+fn extractHtmlAttr(tag_inner: []const u8, attr_name: []const u8) ?[]const u8 {
+    var pos: usize = 0;
+    while (pos + attr_name.len < tag_inner.len) : (pos += 1) {
+        if (!std.mem.startsWith(u8, tag_inner[pos..], attr_name)) continue;
+        // Must be preceded by whitespace to avoid partial matches (e.g. "data-href")
+        if (pos > 0 and tag_inner[pos - 1] != ' ' and tag_inner[pos - 1] != '\t' and tag_inner[pos - 1] != '\n') continue;
+        var p = pos + attr_name.len;
+        // Skip optional whitespace around =
+        while (p < tag_inner.len and (tag_inner[p] == ' ' or tag_inner[p] == '\t')) : (p += 1) {}
+        if (p >= tag_inner.len or tag_inner[p] != '=') continue;
+        p += 1;
+        while (p < tag_inner.len and (tag_inner[p] == ' ' or tag_inner[p] == '\t')) : (p += 1) {}
+        if (p >= tag_inner.len) continue;
+        const quote = tag_inner[p];
+        if (quote != '"' and quote != '\'') continue;
+        const val_start = p + 1;
+        const val_end = std.mem.indexOfScalarPos(u8, tag_inner, val_start, quote) orelse continue;
+        return tag_inner[val_start..val_end];
+    }
+    return null;
+}
+
+/// HTML tag stripper that preserves links and images.
+/// <a href="url">text</a>  →  text (url)   [or just text if text == url]
+/// <img src="url">          →  [image: url]
 fn stripHtmlTags(allocator: std.mem.Allocator, html: []const u8) ![]u8 {
     var result = std.ArrayList(u8).initCapacity(allocator, html.len) catch return try allocator.dupe(u8, html);
     errdefer result.deinit(allocator);
 
-    var in_tag = false;
+    var i: usize = 0;
     var in_entity = false;
     var entity_buffer: [10]u8 = undefined;
     var entity_len: usize = 0;
-    var i: usize = 0;
 
-    while (i < html.len) : (i += 1) {
+    // Track current <a> href to append URL after link text if it differs
+    var link_href: ?[]const u8 = null;
+    var link_text_start: usize = 0;
+
+    while (i < html.len) {
         const c = html[i];
 
         if (c == '<') {
-            in_tag = true;
-        } else if (c == '>') {
-            in_tag = false;
-            // Add space after closing tag for readability
-            if (i + 1 < html.len and html[i + 1] != ' ' and html[i + 1] != '\n') {
-                result.append(allocator, ' ') catch {};
-            }
-        } else if (!in_tag) {
-            if (c == '&') {
-                in_entity = true;
-                entity_len = 0;
-            } else if (in_entity) {
-                if (c == ';') {
-                    in_entity = false;
-                    const entity = entity_buffer[0..entity_len];
-                    if (std.mem.eql(u8, entity, "nbsp")) {
-                        result.append(allocator, ' ') catch {};
-                    } else if (std.mem.eql(u8, entity, "lt")) {
-                        result.append(allocator, '<') catch {};
-                    } else if (std.mem.eql(u8, entity, "gt")) {
-                        result.append(allocator, '>') catch {};
-                    } else if (std.mem.eql(u8, entity, "amp")) {
-                        result.append(allocator, '&') catch {};
-                    } else if (std.mem.eql(u8, entity, "quot")) {
-                        result.append(allocator, '"') catch {};
-                    } else {
-                        // Unknown entity, just skip
+            const close = std.mem.indexOfScalarPos(u8, html, i + 1, '>') orelse {
+                i += 1;
+                continue;
+            };
+            const tag_inner = html[i + 1 .. close];
+            const trimmed = std.mem.trimLeft(u8, tag_inner, " \t\n\r");
+
+            if (trimmed.len > 0 and trimmed[0] == 'a' and
+                (trimmed.len == 1 or trimmed[1] == ' ' or trimmed[1] == '\t' or trimmed[1] == '\n'))
+            {
+                // Opening <a ...> tag - extract href
+                link_href = extractHtmlAttr(tag_inner, "href");
+                link_text_start = result.items.len;
+            } else if (trimmed.len >= 2 and trimmed[0] == '/' and trimmed[1] == 'a' and
+                (trimmed.len == 2 or trimmed[2] == ' ' or trimmed[2] == '\t'))
+            {
+                // Closing </a> tag - append URL if link text differs from href
+                if (link_href) |href| {
+                    const link_text = result.items[link_text_start..result.items.len];
+                    const trimmed_text = std.mem.trim(u8, link_text, " \t\n\r");
+                    if (!std.mem.eql(u8, trimmed_text, href)) {
+                        try result.appendSlice(allocator, " (");
+                        try result.appendSlice(allocator, href);
+                        try result.appendSlice(allocator, ")");
                     }
-                } else if (entity_len < entity_buffer.len) {
-                    entity_buffer[entity_len] = c;
-                    entity_len += 1;
+                    link_href = null;
+                }
+            } else if (trimmed.len >= 3 and std.mem.startsWith(u8, trimmed, "img") and
+                (trimmed.len == 3 or trimmed[3] == ' ' or trimmed[3] == '/' or trimmed[3] == '>'))
+            {
+                // <img> tag - show src URL
+                if (extractHtmlAttr(tag_inner, "src")) |src| {
+                    try result.appendSlice(allocator, "[image: ");
+                    try result.appendSlice(allocator, src);
+                    try result.appendSlice(allocator, "]");
                 }
             } else {
-                result.append(allocator, c) catch {};
+                // Other tag - add space after for readability
+                if (close + 1 < html.len and html[close + 1] != ' ' and html[close + 1] != '\n') {
+                    result.append(allocator, ' ') catch {};
+                }
             }
+
+            i = close + 1;
+            continue;
         }
+
+        // Entity handling
+        if (c == '&') {
+            in_entity = true;
+            entity_len = 0;
+        } else if (in_entity) {
+            if (c == ';') {
+                in_entity = false;
+                const entity = entity_buffer[0..entity_len];
+                if (std.mem.eql(u8, entity, "nbsp")) {
+                    result.append(allocator, ' ') catch {};
+                } else if (std.mem.eql(u8, entity, "lt")) {
+                    result.append(allocator, '<') catch {};
+                } else if (std.mem.eql(u8, entity, "gt")) {
+                    result.append(allocator, '>') catch {};
+                } else if (std.mem.eql(u8, entity, "amp")) {
+                    result.append(allocator, '&') catch {};
+                } else if (std.mem.eql(u8, entity, "quot")) {
+                    result.append(allocator, '"') catch {};
+                } else {
+                    // Unknown entity, skip
+                }
+            } else if (entity_len < entity_buffer.len) {
+                entity_buffer[entity_len] = c;
+                entity_len += 1;
+            }
+        } else {
+            result.append(allocator, c) catch {};
+        }
+
+        i += 1;
     }
 
     return result.toOwnedSlice(allocator);
@@ -80,6 +151,149 @@ fn cleanWhitespace(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     }
 
     return result.toOwnedSlice(allocator);
+}
+
+/// Write plain text extracted from a Jira ADF (Atlassian Document Format) node.
+/// Iterative DFS to avoid per-recursion allocations.
+fn writeAdfText(writer: anytype, node: std.json.Value) !void {
+    const max_stack = 64;
+    var stack: [max_stack]struct { items: []const std.json.Value, idx: usize } = undefined;
+    var depth: usize = 0;
+
+    // Seed with the root node's content array
+    if (node != .object) return;
+    const root_content = node.object.get("content") orelse return;
+    if (root_content != .array) return;
+    stack[0] = .{ .items = root_content.array.items, .idx = 0 };
+    depth = 1;
+
+    while (depth > 0) {
+        const frame = &stack[depth - 1];
+        if (frame.idx >= frame.items.len) {
+            depth -= 1;
+            continue;
+        }
+        const child = frame.items[frame.idx];
+        frame.idx += 1;
+
+        if (child != .object) continue;
+        const obj = child.object;
+
+        // Emit text content
+        if (obj.get("text")) |text_val| {
+            if (text_val == .string) {
+                try writer.writeAll(text_val.string);
+                // Check for link marks and append URL if it differs from text
+                if (obj.get("marks")) |marks_val| {
+                    if (marks_val == .array) {
+                        for (marks_val.array.items) |mark| {
+                            if (mark != .object) continue;
+                            const mt = if (mark.object.get("type")) |t| if (t == .string) t.string else null else null;
+                            if (mt) |mark_type| {
+                                if (std.mem.eql(u8, mark_type, "link")) {
+                                    if (mark.object.get("attrs")) |attrs| {
+                                        if (attrs == .object) {
+                                            if (attrs.object.get("href")) |href| {
+                                                if (href == .string and !std.mem.eql(u8, text_val.string, href.string)) {
+                                                    try writer.writeAll(" (");
+                                                    try writer.writeAll(href.string);
+                                                    try writer.writeAll(")");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Handle inlineCard (smart links / embedded URLs)
+        {
+            const nt = if (obj.get("type")) |t| if (t == .string) t.string else null else null;
+            if (nt) |node_type| {
+                if (std.mem.eql(u8, node_type, "inlineCard") or std.mem.eql(u8, node_type, "embedCard")) {
+                    if (obj.get("attrs")) |attrs| {
+                        if (attrs == .object) {
+                            if (attrs.object.get("url")) |url| {
+                                if (url == .string) {
+                                    try writer.writeAll(url.string);
+                                    try writer.writeAll("\n");
+                                }
+                            }
+                        }
+                    }
+                } else if (std.mem.eql(u8, node_type, "mention")) {
+                    if (obj.get("attrs")) |attrs| {
+                        if (attrs == .object) {
+                            if (attrs.object.get("text")) |text| {
+                                if (text == .string) {
+                                    try writer.writeAll(text.string);
+                                }
+                            }
+                        }
+                    }
+                } else if (std.mem.eql(u8, node_type, "hardBreak")) {
+                    try writer.writeAll("\n");
+                } else if (std.mem.eql(u8, node_type, "media")) {
+                    if (obj.get("attrs")) |attrs| {
+                        if (attrs == .object) {
+                            const mt = if (attrs.object.get("type")) |t| if (t == .string) t.string else null else null;
+                            if (mt) |media_type| {
+                                if (std.mem.eql(u8, media_type, "external")) {
+                                    if (attrs.object.get("url")) |url| {
+                                        if (url == .string) {
+                                            try writer.writeAll("[image: ");
+                                            try writer.writeAll(url.string);
+                                            try writer.writeAll("]");
+                                        }
+                                    }
+                                } else {
+                                    const alt = if (attrs.object.get("alt")) |a| if (a == .string) a.string else null else null;
+                                    if (alt) |alt_text| {
+                                        try writer.writeAll("[image: ");
+                                        try writer.writeAll(alt_text);
+                                        try writer.writeAll("]");
+                                    } else {
+                                        try writer.writeAll("[image]");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Push child's content array onto stack
+        if (obj.get("content")) |content_val| {
+            if (content_val == .array and depth < max_stack) {
+                stack[depth] = .{ .items = content_val.array.items, .idx = 0 };
+                depth += 1;
+                continue; // process children before emitting newline
+            }
+        }
+
+        // Newline after block-level nodes (only when no children were pushed)
+        if (obj.get("type")) |type_val| {
+            if (type_val == .string) {
+                const t = type_val.string;
+                if (std.mem.eql(u8, t, "paragraph") or
+                    std.mem.eql(u8, t, "heading") or
+                    std.mem.eql(u8, t, "bulletList") or
+                    std.mem.eql(u8, t, "orderedList") or
+                    std.mem.eql(u8, t, "listItem") or
+                    std.mem.eql(u8, t, "codeBlock") or
+                    std.mem.eql(u8, t, "blockquote") or
+                    std.mem.eql(u8, t, "rule"))
+                {
+                    try writer.writeAll("\n");
+                }
+            }
+        }
+    }
 }
 
 /// Format Confluence search results as readable text
@@ -336,12 +550,17 @@ pub fn formatJiraIssue(allocator: std.mem.Allocator, json_str: []const u8) ![]u8
         try writer.print("Updated: {s}\n", .{updated.string});
     }
 
-    // Description
+    // Description (can be a plain string or an ADF object in Jira Cloud)
     if (fields_obj.get("description")) |description| {
         if (description != .null) {
             try writer.writeAll("\nDescription:\n");
             try writer.writeAll("─────────────────────────────────────────\n");
-            try writer.print("{s}\n", .{description.string});
+            if (description == .string) {
+                try writer.print("{s}\n", .{description.string});
+            } else if (description == .object) {
+                try writeAdfText(writer, description);
+                try writer.writeAll("\n");
+            }
         }
     }
 
