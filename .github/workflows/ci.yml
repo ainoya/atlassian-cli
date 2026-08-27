@@ -58,16 +58,9 @@ jobs:
           set +e
           mise install zig@0.16.0
           STD="$HOME/.local/share/mise/installs/zig/0.16.0/lib/std"
-          echo "== callMain =="
-          grep -n "fn callMain" -A 45 "$STD"/start.zig | head -60
-          echo "== Args head =="
-          sed -n '1,30p' "$STD"/process/Args.zig
-          echo "== Environ block consts =="
-          grep -nE "pub const (global|Block|empty)|^block:" "$STD"/process/Environ.zig | head -10
-          grep -nE "pub const global" "$STD"/process/Environ.zig | head -5
-          echo "== Environ.getAlloc =="
-          sed -n '680,700p' "$STD"/process/Environ.zig
-          echo "== Dir absolute helpers =="
-          grep -nE "pub fn (openFileAbsolute|writeFile|makePath)\(" "$STD"/Io/Dir.zig | head -10
-          echo "== Client fields =="
-          sed -n '20,45p' "$STD"/http/Client.zig
+          echo "== callMain body =="
+          awk '/^fn callMain/,/^}/' "$STD"/start.zig | head -70
+          echo "== Args pub decls =="
+          grep -nE "^pub (fn|const|var) |^pub const global" "$STD"/process/Args.zig | head -20
+          echo "== Io.Limit =="
+          grep -nE "pub const Limit|pub fn limited|pub const unlimited" "$STD"/Io.zig | head -10
