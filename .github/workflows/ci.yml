@@ -41,25 +41,3 @@ jobs:
 
       - name: Test
         run: zig build test --summary all
-
-  # TEMPORARY: capture the 0.16 file permission API.
-  probe-zig-016:
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v4
-        with:
-          cache: true
-      - name: Probe permissions API
-        run: |
-          set +e
-          STD="$HOME/.local/share/mise/installs/zig/0.16.0/lib/std"
-          echo "== File.setPermissions =="
-          grep -n "pub fn setPermissions" -A 8 "$STD"/Io/File.zig
-          echo "== Permissions type =="
-          grep -rnE "pub const Permissions" "$STD"/Io/File.zig "$STD"/Io/Dir.zig | head -5
-          grep -n "pub const Permissions" -A 30 "$STD"/Io/File.zig | head -45
-          echo "== CreateFileOptions =="
-          sed -n '586,615p' "$STD"/Io/Dir.zig
-

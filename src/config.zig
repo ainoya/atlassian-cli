@@ -81,7 +81,9 @@ pub const Config = struct {
         defer file.close(self.io);
 
         // The config file holds an API token, so keep it owner-only.
-        try file.setPermissions(self.io, .{ .mode = 0o600 });
+        if (builtin.os.tag != .windows) {
+            try file.setPermissions(self.io, @enumFromInt(0o600));
+        }
 
         var list: std.Io.Writer.Allocating = .init(self.allocator);
         defer list.deinit();
