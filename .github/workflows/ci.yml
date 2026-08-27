@@ -55,8 +55,9 @@ jobs:
         run: |
           set +e
           STD="$HOME/.local/share/mise/installs/zig/0.16.0/lib/std"
-          echo "== start.zig 700-760 =="
-          sed -n '700,760p' "$STD"/start.zig
-          echo "== wrapMain =="
-          grep -n "fn wrapMain" -A 20 "$STD"/start.zig | head -30
-
+          echo "== candidate types =="
+          grep -rnE "pub const (Start|Init|Minimal|MainOptions)\b" "$STD"/process.zig "$STD"/start.zig "$STD"/std.zig | head -20
+          echo "== process.zig Start =="
+          grep -n "Start" "$STD"/process.zig | head -20
+          echo "== start.zig type refs near call =="
+          sed -n '660,700p' "$STD"/start.zig
