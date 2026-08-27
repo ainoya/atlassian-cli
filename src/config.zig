@@ -77,9 +77,11 @@ pub const Config = struct {
         const file = try std.Io.Dir.createFileAbsolute(self.io, config_path, .{
             .read = true,
             .truncate = true,
-            .mode = 0o600,
         });
         defer file.close(self.io);
+
+        // The config file holds an API token, so keep it owner-only.
+        try file.setPermissions(self.io, .{ .mode = 0o600 });
 
         var list: std.Io.Writer.Allocating = .init(self.allocator);
         defer list.deinit();
