@@ -41,3 +41,36 @@ jobs:
 
       - name: Test
         run: zig build test --summary all
+
+  # TEMPORARY: probe the Zig 0.16 std API surface ahead of the migration.
+  # Removed in the following commit.
+  probe-zig-016:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: jdx/mise-action@v4
+        with:
+          cache: true
+
+      - name: Probe std API
+        run: |
+          set +e
+          mise install zig@0.16.0
+          STD="$HOME/.local/share/mise/installs/zig/0.16.0/lib/std"
+          echo "== version =="; mise exec zig@0.16.0 -- zig version
+          echo "== ls std =="; ls "$STD"
+          echo "== io.zig / Io.zig =="; ls -l "$STD"/io.zig "$STD"/Io.zig 2>&1
+          echo "== heap allocators =="
+          grep -nE "pub (const|fn) (DebugAllocator|GeneralPurposeAllocator|smp_allocator|page_allocator)" "$STD"/heap.zig
+          echo "== Io.Writer.Allocating =="
+          grep -n "pub const Allocating" -A 40 "$STD"/Io/Writer.zig | head -60
+          echo "== http FetchOptions =="
+          sed -n '/pub const FetchOptions/,/^};/p' "$STD"/http/Client.zig
+          echo "== http fetch =="
+          sed -n '/pub fn fetch(/,/^}/p' "$STD"/http/Client.zig | head -60
+          echo "== http Client fields/init =="
+          grep -n "pub fn init\|^    allocator\|^    reader_buffer\|^    writer_buffer" "$STD"/http/Client.zig | head -20
+          echo "== array_list =="
+          grep -n "pub fn writer\|pub fn initCapacity\|pub fn toOwnedSlice" "$STD"/array_list.zig | head -20
