@@ -59,18 +59,18 @@ jobs:
           set +e
           mise install zig@0.16.0
           STD="$HOME/.local/share/mise/installs/zig/0.16.0/lib/std"
-          echo "== Writer.fixed =="
-          grep -n "pub fn fixed" -A 12 "$STD"/Io/Writer.zig | head -30
-          echo "== Writer buffered/written =="
-          grep -nE "pub fn (buffered|written|toOwnedSlice|deinit|clearRetainingCapacity)\(" "$STD"/Io/Writer.zig | head -30
-          echo "== array_list writer/print =="
-          grep -nE "pub fn (writer|print|appendSlice|append|deinit)\(" "$STD"/array_list.zig | head -30
-          echo "== Build addModule/addExecutable/addTest =="
-          grep -nE "pub fn (addModule|addExecutable|addTest|createModule|installArtifact|addRunArtifact|step)\(" "$STD"/Build.zig | head -20
-          echo "== misc presence =="
-          grep -nE "pub fn (parseFromSlice)\(" "$STD"/json/static.zig | head -5
-          grep -nE "pub fn (argsAlloc|argsFree)\(" "$STD"/process.zig | head -5
-          grep -nE "pub fn (bufPrint)\(" "$STD"/fmt.zig | head -5
-          grep -nE "pub const standard\b" "$STD"/base64.zig | head -5
-          echo "== BUILD AGAINST 0.16 =="
-          mise exec zig@0.16.0 -- zig build --summary none 2>&1 | head -120
+          echo "== process: args/env =="
+          grep -nE "pub (fn|const) [A-Za-z_]*[Aa]rgs[A-Za-z_]*\(|pub (fn|const) [A-Za-z_]*[Ee]nv[A-Za-z_]*" "$STD"/process.zig | head -40
+          echo "== process/Environ =="
+          ls "$STD"/process 2>&1 | head
+          grep -nE "pub fn (get|getEnvVarOwned|hasEnvVar)" "$STD"/process/Environ.zig 2>/dev/null | head -20
+          echo "== fs File open/create =="
+          grep -nE "pub fn (openFileAbsolute|createFileAbsolute|cwd)\(" "$STD"/fs.zig | head -10
+          echo "== File read/write =="
+          grep -nE "pub fn (readToEndAlloc|writeAll|deprecatedReader|deprecatedWriter|reader|writer)\(" "$STD"/fs/File.zig | head -20
+          echo "== debug.print / testing =="
+          grep -nE "pub fn print\(" "$STD"/debug.zig | head -5
+          grep -nE "pub fn (expectEqualStrings|refAllDecls|expectError|expect)\(" "$STD"/testing.zig | head -10
+          echo "== meta.stringToEnum / fmt.parseInt =="
+          grep -nE "pub fn stringToEnum\(" "$STD"/meta.zig | head -3
+          grep -nE "pub fn parseInt\(" "$STD"/fmt/parse_int.zig "$STD"/fmt.zig 2>/dev/null | head -3
