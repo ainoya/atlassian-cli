@@ -41,3 +41,26 @@ jobs:
 
       - name: Test
         run: zig build test --summary all
+
+  # TEMPORARY: list the 0.16 Io.Dir / Io.File surface.
+  probe-zig-016:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+        with:
+          cache: true
+      - name: Probe Dir/File
+        run: |
+          set +e
+          STD="$HOME/.local/share/mise/installs/zig/0.16.0/lib/std"
+          echo "== Io.Dir pub fns =="
+          grep -oE "^pub fn [a-zA-Z0-9_]+" "$STD"/Io/Dir.zig | sed 's/pub fn //' | sort -u | tr '\n' ' '
+          echo
+          echo "== Io.File pub fns =="
+          grep -oE "^pub fn [a-zA-Z0-9_]+" "$STD"/Io/File.zig | sed 's/pub fn //' | sort -u | tr '\n' ' '
+          echo
+          echo "== File.Writer =="
+          grep -nE "pub const Writer|interface" "$STD"/Io/File/Writer.zig 2>/dev/null | head -10
+
