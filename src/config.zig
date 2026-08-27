@@ -71,7 +71,7 @@ pub const Config = struct {
 
         // Ensure directory exists
         if (std.fs.path.dirname(config_path)) |dir| {
-            try std.Io.Dir.cwd().makePath(self.io, dir);
+            try std.Io.Dir.cwd().createDirPath(self.io, dir);
         }
 
         const file = try std.Io.Dir.createFileAbsolute(self.io, config_path, .{
