@@ -41,3 +41,13 @@ jobs:
 
       - name: Test
         run: zig build test --summary all
+
+      # The release builds these targets via goreleaser; make sure they still
+      # compile before a tag is cut.
+      - name: Cross-compile release targets
+        run: |
+          for target in aarch64-macos x86_64-linux x86_64-windows; do
+            echo "::group::$target"
+            zig build -Dtarget=$target -Doptimize=ReleaseSafe --summary none || exit 1
+            echo "::endgroup::"
+          done
