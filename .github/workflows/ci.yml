@@ -41,23 +41,3 @@ jobs:
 
       - name: Test
         run: zig build test --summary all
-
-  # TEMPORARY: determine the 0.16 main() parameter shape.
-  probe-zig-016:
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v4
-        with:
-          cache: true
-      - name: Probe main signature
-        run: |
-          set +e
-          STD="$HOME/.local/share/mise/installs/zig/0.16.0/lib/std"
-          echo "== candidate types =="
-          grep -rnE "pub const (Start|Init|Minimal|MainOptions)\b" "$STD"/process.zig "$STD"/start.zig "$STD"/std.zig | head -20
-          echo "== process.zig Start =="
-          grep -n "Start" "$STD"/process.zig | head -20
-          echo "== start.zig type refs near call =="
-          sed -n '660,700p' "$STD"/start.zig

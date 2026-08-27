@@ -468,16 +468,14 @@ fn handleConfluenceCommand(allocator: std.mem.Allocator, environ: std.process.En
     }
 }
 
-pub fn main(args_source: std.process.Args, environ: std.process.Environ) !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    // Zig 0.16 hands the program its allocators, Io implementation and
+    // process environment; there is no need to construct them here.
+    const allocator = init.gpa;
+    const io = init.io;
+    const environ = init.minimal.environ;
 
-    const io = std.Io.Threaded.global_single_threaded.io();
-
-    var args_arena = std.heap.ArenaAllocator.init(allocator);
-    defer args_arena.deinit();
-    const args = try args_source.toSlice(args_arena.allocator());
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len < 2) {
         try printHelp();
