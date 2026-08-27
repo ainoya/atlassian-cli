@@ -34,8 +34,7 @@ pub const JiraClient = struct {
         defer self.allocator.free(encoded_jql);
 
         var params_buffer: [4096]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&params_buffer);
-        var writer = stream.writer();
+        var writer = std.Io.Writer.fixed(&params_buffer);
 
         try writer.print("jql={s}", .{encoded_jql});
 
@@ -48,7 +47,7 @@ pub const JiraClient = struct {
         try writer.print("&maxResults={d}", .{max_results});
 
         const endpoint = "/rest/api/3/search/jql";
-        return try self.client.makeRequest(.GET, endpoint, stream.getWritten());
+        return try self.client.makeRequest(.GET, endpoint, writer.buffered());
     }
 
     /// Get all projects

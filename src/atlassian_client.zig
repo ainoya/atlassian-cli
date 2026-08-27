@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const AtlassianClient = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     base_url: []const u8,
     username: []const u8,
     api_token: []const u8,
@@ -10,6 +11,7 @@ pub const AtlassianClient = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
+        io: std.Io,
         base_url: []const u8,
         username: []const u8,
         api_token: []const u8,
@@ -17,10 +19,11 @@ pub const AtlassianClient = struct {
     ) AtlassianClient {
         return .{
             .allocator = allocator,
+            .io = io,
             .base_url = base_url,
             .username = username,
             .api_token = api_token,
-            .http_client = std.http.Client{ .allocator = allocator },
+            .http_client = std.http.Client{ .allocator = allocator, .io = io },
             .is_cloud = is_cloud,
         };
     }
@@ -64,7 +67,7 @@ pub const AtlassianClient = struct {
         const auth_header = try self.createAuthHeader(&auth_header_buffer);
 
         // Allocating writer for response
-        var response_writer = std.io.Writer.Allocating.init(self.allocator);
+        var response_writer = std.Io.Writer.Allocating.init(self.allocator);
         defer response_writer.deinit();
 
         const response = try self.http_client.fetch(.{
@@ -106,6 +109,7 @@ test "create auth header" {
     const allocator = std.testing.allocator;
     var client = AtlassianClient.init(
         allocator,
+        std.Io.Threaded.global_single_threaded.io(),
         "https://test.atlassian.net",
         "test@example.com",
         "test_token",

@@ -301,7 +301,7 @@ fn handleJiraCommand(allocator: std.mem.Allocator, client: *AtlassianClient, arg
 }
 
 /// Modify Confluence command handler to pass base URL
-fn handleConfluenceCommand(allocator: std.mem.Allocator, client: *AtlassianClient, args: []const [:0]const u8, base_url: []const u8) !void {
+fn handleConfluenceCommand(allocator: std.mem.Allocator, environ: std.process.Environ, client: *AtlassianClient, args: []const [:0]const u8, base_url: []const u8) !void {
     if (args.len < 1) {
         try printConfluenceHelp();
         return;
@@ -314,7 +314,7 @@ fn handleConfluenceCommand(allocator: std.mem.Allocator, client: *AtlassianClien
     };
 
     // Get Confluence base path (default: /wiki for Confluence Cloud)
-    const confluence_base_path = std.process.getEnvVarOwned(allocator, "CONFLUENCE_BASE_PATH") catch "/wiki";
+    const confluence_base_path = environ.getAlloc(allocator, "CONFLUENCE_BASE_PATH") catch "/wiki";
     defer if (!std.mem.eql(u8, confluence_base_path, "/wiki")) allocator.free(confluence_base_path);
 
     var confluence = ConfluenceClient.init(client, allocator, confluence_base_path);
@@ -468,13 +468,16 @@ fn handleConfluenceCommand(allocator: std.mem.Allocator, client: *AtlassianClien
     }
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(args_source: std.process.Args, environ: std.process.Environ) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var args_arena = std.heap.ArenaAllocator.init(allocator);
+    defer args_arena.deinit();
+    const args = try args_source.toSlice(args_arena.allocator());
 
     if (args.len < 2) {
         try printHelp();
@@ -499,7 +502,7 @@ pub fn main() !void {
     }
 
     // Load config
-    var config = config_mod.Config.init(allocator);
+    var config = config_mod.Config.init(allocator, io, environ);
     defer config.deinit();
     try config.load();
 
@@ -540,7 +543,7 @@ pub fn main() !void {
 
     // Get environment variables or config
     // Helper to get optional env var
-    const env_url = std.process.getEnvVarOwned(allocator, "ATLASSIAN_URL") catch alias: {
+    const env_url = environ.getAlloc(allocator, "ATLASSIAN_URL") catch alias: {
         break :alias null;
     };
     defer if (env_url) |e| allocator.free(e);
@@ -552,7 +555,7 @@ pub fn main() !void {
     };
     defer allocator.free(base_url);
 
-    const env_username = std.process.getEnvVarOwned(allocator, "ATLASSIAN_USERNAME") catch null;
+    const env_username = environ.getAlloc(allocator, "ATLASSIAN_USERNAME") catch null;
     defer if (env_username) |e| allocator.free(e);
 
     const username = try config_mod.resolve(allocator, env_username, config.atlassian_username, false) orelse {
@@ -561,7 +564,7 @@ pub fn main() !void {
     };
     defer allocator.free(username);
 
-    const env_token = std.process.getEnvVarOwned(allocator, "ATLASSIAN_API_TOKEN") catch null;
+    const env_token = environ.getAlloc(allocator, "ATLASSIAN_API_TOKEN") catch null;
     defer if (env_token) |e| allocator.free(e);
 
     const api_token = try config_mod.resolve(allocator, env_token, config.atlassian_api_token, false) orelse {
@@ -570,12 +573,12 @@ pub fn main() !void {
     };
     defer allocator.free(api_token);
 
-    const is_cloud_str = std.process.getEnvVarOwned(allocator, "ATLASSIAN_CLOUD") catch "true";
+    const is_cloud_str = environ.getAlloc(allocator, "ATLASSIAN_CLOUD") catch "true";
     defer if (!std.mem.eql(u8, is_cloud_str, "true")) allocator.free(is_cloud_str);
     const is_cloud = std.mem.eql(u8, is_cloud_str, "true");
 
     // Initialize client
-    var client = AtlassianClient.init(allocator, base_url, username, api_token, is_cloud);
+    var client = AtlassianClient.init(allocator, io, base_url, username, api_token, is_cloud);
 
     defer client.deinit();
 
@@ -583,7 +586,7 @@ pub fn main() !void {
     // Pass base URL to Confluence command to dynamically generate URL
     switch (service) {
         .jira => try handleJiraCommand(allocator, &client, args[2..]),
-        .confluence => try handleConfluenceCommand(allocator, &client, args[2..], base_url),
+        .confluence => try handleConfluenceCommand(allocator, environ, &client, args[2..], base_url),
         .config => {}, // Handled above
     }
 }

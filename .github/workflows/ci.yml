@@ -41,26 +41,3 @@ jobs:
 
       - name: Test
         run: zig build test --summary all
-
-  # TEMPORARY: probe the Zig 0.16 Io/process API. Removed once the port lands.
-  probe-zig-016:
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: jdx/mise-action@v4
-        with:
-          cache: true
-
-      - name: Probe std API
-        run: |
-          set +e
-          mise install zig@0.16.0
-          STD="$HOME/.local/share/mise/installs/zig/0.16.0/lib/std"
-          echo "== callMain body =="
-          awk '/^fn callMain/,/^}/' "$STD"/start.zig | head -70
-          echo "== Args pub decls =="
-          grep -nE "^pub (fn|const|var) |^pub const global" "$STD"/process/Args.zig | head -20
-          echo "== Io.Limit =="
-          grep -nE "pub const Limit|pub fn limited|pub const unlimited" "$STD"/Io.zig | head -10
