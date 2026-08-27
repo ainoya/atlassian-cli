@@ -41,3 +41,22 @@ jobs:
 
       - name: Test
         run: zig build test --summary all
+
+  # TEMPORARY: determine the 0.16 main() parameter shape.
+  probe-zig-016:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+        with:
+          cache: true
+      - name: Probe main signature
+        run: |
+          set +e
+          STD="$HOME/.local/share/mise/installs/zig/0.16.0/lib/std"
+          echo "== start.zig 700-760 =="
+          sed -n '700,760p' "$STD"/start.zig
+          echo "== wrapMain =="
+          grep -n "fn wrapMain" -A 20 "$STD"/start.zig | head -30
+
