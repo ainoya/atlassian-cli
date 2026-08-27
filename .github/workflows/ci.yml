@@ -41,3 +41,43 @@ jobs:
 
       - name: Test
         run: zig build test --summary all
+
+  # TEMPORARY: probe the Zig 0.16 Io/process API. Removed once the port lands.
+  probe-zig-016:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: jdx/mise-action@v4
+        with:
+          cache: true
+
+      - name: Probe std API
+        run: |
+          set +e
+          mise install zig@0.16.0
+          STD="$HOME/.local/share/mise/installs/zig/0.16.0/lib/std"
+          echo "== process.zig head =="
+          sed -n '1,40p' "$STD"/process.zig
+          echo "== process.zig pub decls =="
+          grep -nE "^pub (fn|const|var) " "$STD"/process.zig | head -40
+          echo "== Args: how to obtain =="
+          sed -n '1,25p' "$STD"/process/Args.zig
+          echo "== Environ head =="
+          sed -n '1,24p' "$STD"/process/Environ.zig
+          echo "== Environ.getAlloc =="
+          sed -n '685,700p' "$STD"/process/Environ.zig
+          echo "== Threaded =="
+          grep -nE "^pub (fn|const) |^    pub fn (init|deinit|io)\(" "$STD"/Io/Threaded.zig | head -25
+          echo "== Dir.readFileAlloc =="
+          sed -n '1326,1345p' "$STD"/Io/Dir.zig
+          echo "== Dir.createFile opts =="
+          sed -n '638,650p' "$STD"/Io/Dir.zig
+          echo "== File writeAll / end =="
+          grep -nE "pub fn (writeAll|writeAllStreaming|end|flush)\(" "$STD"/Io/File.zig | head -10
+          echo "== http Client io =="
+          grep -nE "^io:|    io:|pub fn request\(|pub const Client|^pub fn init" "$STD"/http/Client.zig | head -15
+          echo "== start.zig main signature =="
+          grep -n "callMain" -A 25 "$STD"/start.zig | sed -n '1,45p'
+
