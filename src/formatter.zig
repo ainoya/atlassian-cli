@@ -5,57 +5,137 @@ pub const OutputFormat = enum {
     json,
 };
 
-/// Simple HTML tag stripper - removes HTML tags and decodes basic entities
+/// Trim ASCII whitespace from both ends. std.mem.trimLeft was removed in Zig
+/// 0.16, and this keeps the stripper independent of that churn.
+fn trimAsciiWhitespace(text: []const u8) []const u8 {
+    var start: usize = 0;
+    var end: usize = text.len;
+    while (start < end and std.ascii.isWhitespace(text[start])) : (start += 1) {}
+    while (end > start and std.ascii.isWhitespace(text[end - 1])) : (end -= 1) {}
+    return text[start..end];
+}
+
+/// Extract the value of an HTML attribute from the inner text of a tag.
+/// Given `a href="https://example.com" class="link"` and "href", returns
+/// "https://example.com" as a slice into `tag_inner`.
+fn extractHtmlAttr(tag_inner: []const u8, attr_name: []const u8) ?[]const u8 {
+    var pos: usize = 0;
+    while (pos + attr_name.len <= tag_inner.len) : (pos += 1) {
+        if (!std.mem.startsWith(u8, tag_inner[pos..], attr_name)) continue;
+        // Must be preceded by whitespace, so "data-href" does not match "href"
+        if (pos > 0 and !std.ascii.isWhitespace(tag_inner[pos - 1])) continue;
+        var p = pos + attr_name.len;
+        while (p < tag_inner.len and std.ascii.isWhitespace(tag_inner[p])) : (p += 1) {}
+        if (p >= tag_inner.len or tag_inner[p] != '=') continue;
+        p += 1;
+        while (p < tag_inner.len and std.ascii.isWhitespace(tag_inner[p])) : (p += 1) {}
+        if (p >= tag_inner.len) continue;
+        const quote = tag_inner[p];
+        if (quote != '"' and quote != '\'') continue;
+        const val_start = p + 1;
+        const val_end = std.mem.indexOfScalarPos(u8, tag_inner, val_start, quote) orelse continue;
+        return tag_inner[val_start..val_end];
+    }
+    return null;
+}
+
+/// True when `trimmed` starts with `name` as a whole tag name, so that "a"
+/// matches `<a href=...>` but not `<abbr>`.
+fn tagNameIs(trimmed: []const u8, name: []const u8) bool {
+    if (!std.mem.startsWith(u8, trimmed, name)) return false;
+    if (trimmed.len == name.len) return true;
+    const next = trimmed[name.len];
+    return std.ascii.isWhitespace(next) or next == '/';
+}
+
+/// HTML tag stripper that keeps the information links carry.
+///   <a href="url">text</a>  ->  text (url), or just text when they are equal
+///   <img src="url">         ->  [image: url]
+/// Other tags are dropped, and the basic named entities are decoded.
 fn stripHtmlTags(allocator: std.mem.Allocator, html: []const u8) ![]u8 {
     var result = std.ArrayList(u8).initCapacity(allocator, html.len) catch return try allocator.dupe(u8, html);
     errdefer result.deinit(allocator);
 
-    var in_tag = false;
-    var in_entity = false;
-    var entity_buffer: [10]u8 = undefined;
-    var entity_len: usize = 0;
-    var i: usize = 0;
+    // href of the <a> currently open, and where its text began in `result`.
+    var link_href: ?[]const u8 = null;
+    var link_text_start: usize = 0;
 
-    while (i < html.len) : (i += 1) {
+    var i: usize = 0;
+    while (i < html.len) {
         const c = html[i];
 
         if (c == '<') {
-            in_tag = true;
-        } else if (c == '>') {
-            in_tag = false;
-            // Add space after closing tag for readability
-            if (i + 1 < html.len and html[i + 1] != ' ' and html[i + 1] != '\n') {
-                result.append(allocator, ' ') catch {};
-            }
-        } else if (!in_tag) {
-            if (c == '&') {
-                in_entity = true;
-                entity_len = 0;
-            } else if (in_entity) {
-                if (c == ';') {
-                    in_entity = false;
-                    const entity = entity_buffer[0..entity_len];
-                    if (std.mem.eql(u8, entity, "nbsp")) {
-                        result.append(allocator, ' ') catch {};
-                    } else if (std.mem.eql(u8, entity, "lt")) {
-                        result.append(allocator, '<') catch {};
-                    } else if (std.mem.eql(u8, entity, "gt")) {
-                        result.append(allocator, '>') catch {};
-                    } else if (std.mem.eql(u8, entity, "amp")) {
-                        result.append(allocator, '&') catch {};
-                    } else if (std.mem.eql(u8, entity, "quot")) {
-                        result.append(allocator, '"') catch {};
-                    } else {
-                        // Unknown entity, just skip
+            const close = std.mem.indexOfScalarPos(u8, html, i + 1, '>') orelse {
+                // Unterminated '<': treat it as text rather than losing the rest.
+                try result.append(allocator, c);
+                i += 1;
+                continue;
+            };
+            const tag_inner = html[i + 1 .. close];
+            const trimmed = trimAsciiWhitespace(tag_inner);
+
+            if (tagNameIs(trimmed, "a")) {
+                link_href = extractHtmlAttr(tag_inner, "href");
+                link_text_start = result.items.len;
+            } else if (tagNameIs(trimmed, "/a")) {
+                if (link_href) |href| {
+                    const link_text = result.items[link_text_start..];
+                    const trimmed_text = trimAsciiWhitespace(link_text);
+                    if (!std.mem.eql(u8, trimmed_text, href)) {
+                        try result.appendSlice(allocator, " (");
+                        try result.appendSlice(allocator, href);
+                        try result.append(allocator, ')');
                     }
-                } else if (entity_len < entity_buffer.len) {
-                    entity_buffer[entity_len] = c;
-                    entity_len += 1;
+                    link_href = null;
+                }
+            } else if (tagNameIs(trimmed, "img")) {
+                if (extractHtmlAttr(tag_inner, "src")) |src| {
+                    try result.appendSlice(allocator, "[image: ");
+                    try result.appendSlice(allocator, src);
+                    try result.append(allocator, ']');
                 }
             } else {
-                result.append(allocator, c) catch {};
+                // Any other tag: a space keeps words from running together.
+                if (close + 1 < html.len and html[close + 1] != ' ' and html[close + 1] != '\n') {
+                    try result.append(allocator, ' ');
+                }
             }
+
+            i = close + 1;
+            continue;
         }
+
+        if (c == '&') {
+            // Decode a named entity, but only if it actually terminates: a bare
+            // '&' in prose must survive rather than swallowing what follows.
+            var end = i + 1;
+            while (end < html.len and end - i <= 10 and (std.ascii.isAlphanumeric(html[end]) or html[end] == '#')) : (end += 1) {}
+            if (end < html.len and html[end] == ';' and end > i + 1) {
+                const entity = html[i + 1 .. end];
+                if (std.mem.eql(u8, entity, "nbsp")) {
+                    try result.append(allocator, ' ');
+                } else if (std.mem.eql(u8, entity, "lt")) {
+                    try result.append(allocator, '<');
+                } else if (std.mem.eql(u8, entity, "gt")) {
+                    try result.append(allocator, '>');
+                } else if (std.mem.eql(u8, entity, "amp")) {
+                    try result.append(allocator, '&');
+                } else if (std.mem.eql(u8, entity, "quot")) {
+                    try result.append(allocator, '"');
+                } else if (std.mem.eql(u8, entity, "apos")) {
+                    try result.append(allocator, '\'');
+                }
+                // Unknown entities are dropped, as before.
+                i = end + 1;
+                continue;
+            }
+            try result.append(allocator, c);
+            i += 1;
+            continue;
+        }
+
+        try result.append(allocator, c);
+        i += 1;
     }
 
     return result.toOwnedSlice(allocator);
@@ -80,6 +160,129 @@ fn cleanWhitespace(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     }
 
     return result.toOwnedSlice(allocator);
+}
+
+/// Render the plain text of a Jira ADF (Atlassian Document Format) node.
+///
+/// Iterative rather than recursive so a deeply nested (or hostile) document
+/// cannot blow the stack; nodes deeper than `max_depth` are skipped.
+fn writeAdfText(writer: *std.Io.Writer, node: std.json.Value) !void {
+    const max_depth = 64;
+    const Frame = struct { items: []const std.json.Value, idx: usize, is_block: bool };
+    var stack: [max_depth]Frame = undefined;
+
+    if (node != .object) return;
+    const root_content = node.object.get("content") orelse return;
+    if (root_content != .array) return;
+
+    stack[0] = .{ .items = root_content.array.items, .idx = 0, .is_block = false };
+    var depth: usize = 1;
+
+    while (depth > 0) {
+        const frame = &stack[depth - 1];
+        if (frame.idx >= frame.items.len) {
+            if (frame.is_block) try writer.writeAll("\n");
+            depth -= 1;
+            continue;
+        }
+        const child = frame.items[frame.idx];
+        frame.idx += 1;
+
+        if (child != .object) continue;
+        const obj = child.object;
+        const node_type = stringField(obj, "type");
+
+        if (stringField(obj, "text")) |text| {
+            try writer.writeAll(text);
+            if (linkHref(obj)) |href| {
+                if (!std.mem.eql(u8, text, href)) {
+                    try writer.print(" ({s})", .{href});
+                }
+            }
+        }
+
+        if (node_type) |t| {
+            if (std.mem.eql(u8, t, "inlineCard") or std.mem.eql(u8, t, "embedCard")) {
+                if (attrString(obj, "url")) |url| try writer.print("{s}\n", .{url});
+            } else if (std.mem.eql(u8, t, "mention")) {
+                if (attrString(obj, "text")) |text| try writer.writeAll(text);
+            } else if (std.mem.eql(u8, t, "hardBreak")) {
+                try writer.writeAll("\n");
+            } else if (std.mem.eql(u8, t, "media")) {
+                try writeAdfMedia(writer, obj);
+            }
+        }
+
+        if (obj.get("content")) |content| {
+            if (content == .array and depth < max_depth) {
+                stack[depth] = .{
+                    .items = content.array.items,
+                    .idx = 0,
+                    .is_block = if (node_type) |t| isAdfBlock(t) else false,
+                };
+                depth += 1;
+                continue;
+            }
+        }
+
+        if (node_type) |t| {
+            if (std.mem.eql(u8, t, "rule")) try writer.writeAll("\n");
+        }
+    }
+}
+
+fn isAdfBlock(node_type: []const u8) bool {
+    const blocks = [_][]const u8{
+        "paragraph",  "heading",   "bulletList", "orderedList",
+        "listItem",   "codeBlock", "blockquote", "rule",
+    };
+    for (blocks) |block| {
+        if (std.mem.eql(u8, node_type, block)) return true;
+    }
+    return false;
+}
+
+fn writeAdfMedia(writer: *std.Io.Writer, obj: std.json.ObjectMap) !void {
+    const media_type = attrString(obj, "type") orelse {
+        try writer.writeAll("[image]");
+        return;
+    };
+    const label = if (std.mem.eql(u8, media_type, "external"))
+        attrString(obj, "url")
+    else
+        attrString(obj, "alt");
+
+    if (label) |text| {
+        try writer.print("[image: {s}]", .{text});
+    } else {
+        try writer.writeAll("[image]");
+    }
+}
+
+/// The value of `obj.field` when it is a string.
+fn stringField(obj: std.json.ObjectMap, field: []const u8) ?[]const u8 {
+    const value = obj.get(field) orelse return null;
+    return if (value == .string) value.string else null;
+}
+
+/// The value of `obj.attrs.field` when it is a string.
+fn attrString(obj: std.json.ObjectMap, field: []const u8) ?[]const u8 {
+    const attrs = obj.get("attrs") orelse return null;
+    if (attrs != .object) return null;
+    return stringField(attrs.object, field);
+}
+
+/// The href of the first `link` mark on a text node, if it has one.
+fn linkHref(obj: std.json.ObjectMap) ?[]const u8 {
+    const marks = obj.get("marks") orelse return null;
+    if (marks != .array) return null;
+    for (marks.array.items) |mark| {
+        if (mark != .object) continue;
+        const mark_type = stringField(mark.object, "type") orelse continue;
+        if (!std.mem.eql(u8, mark_type, "link")) continue;
+        if (attrString(mark.object, "href")) |href| return href;
+    }
+    return null;
 }
 
 /// Format Confluence search results as readable text
@@ -336,12 +539,22 @@ pub fn formatJiraIssue(allocator: std.mem.Allocator, json_str: []const u8) ![]u8
         try writer.print("Updated: {s}\n", .{updated.string});
     }
 
-    // Description
+    // Description: a plain string on Jira Server/DC, an ADF document on Cloud
     if (fields_obj.get("description")) |description| {
-        if (description != .null) {
-            try writer.writeAll("\nDescription:\n");
-            try writer.writeAll("─────────────────────────────────────────\n");
-            try writer.print("{s}\n", .{description.string});
+        switch (description) {
+            .null => {},
+            .string => |text| {
+                try writer.writeAll("\nDescription:\n");
+                try writer.writeAll("─────────────────────────────────────────\n");
+                try writer.print("{s}\n", .{text});
+            },
+            .object => {
+                try writer.writeAll("\nDescription:\n");
+                try writer.writeAll("─────────────────────────────────────────\n");
+                try writeAdfText(writer, description);
+                try writer.writeAll("\n");
+            },
+            else => {},
         }
     }
 
@@ -483,4 +696,76 @@ pub fn formatGenericList(allocator: std.mem.Allocator, json_str: []const u8, ite
     }
 
     return try allocator.dupe(u8, "No items found.\n");
+}
+
+test "formatJiraIssue renders an ADF description" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "key": "PROJ-1",
+        \\  "fields": {
+        \\    "summary": "Investigate the formatter",
+        \\    "description": {
+        \\      "type": "doc",
+        \\      "version": 1,
+        \\      "content": [
+        \\        { "type": "paragraph", "content": [{ "type": "text", "text": "First line." }] },
+        \\        { "type": "paragraph", "content": [
+        \\          { "type": "text", "text": "See the docs",
+        \\            "marks": [{ "type": "link", "attrs": { "href": "https://example.com/docs" } }] }
+        \\        ]}
+        \\      ]
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const formatted = try formatJiraIssue(allocator, json);
+    defer allocator.free(formatted);
+
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "Issue: PROJ-1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "First line.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "See the docs (https://example.com/docs)") != null);
+}
+
+test "formatJiraIssue still renders a plain string description" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{ "key": "PROJ-2", "fields": { "summary": "Server", "description": "Plain text body" } }
+    ;
+
+    const formatted = try formatJiraIssue(allocator, json);
+    defer allocator.free(formatted);
+
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "Plain text body") != null);
+}
+
+test "stripHtmlTags keeps link targets and image sources" {
+    const allocator = std.testing.allocator;
+
+    const with_link = try stripHtmlTags(allocator, "<p>See <a href=\"https://example.com\">the page</a>.</p>");
+    defer allocator.free(with_link);
+    try std.testing.expect(std.mem.indexOf(u8, with_link, "the page (https://example.com)") != null);
+
+    // A link whose text is already the URL should not be repeated.
+    const bare = try stripHtmlTags(allocator, "<a href=\"https://example.com\">https://example.com</a>");
+    defer allocator.free(bare);
+    try std.testing.expect(std.mem.indexOf(u8, bare, "(https://example.com)") == null);
+
+    const image = try stripHtmlTags(allocator, "<img src=\"https://example.com/a.png\" />");
+    defer allocator.free(image);
+    try std.testing.expect(std.mem.indexOf(u8, image, "[image: https://example.com/a.png]") != null);
+}
+
+test "stripHtmlTags decodes entities without swallowing bare ampersands" {
+    const allocator = std.testing.allocator;
+
+    const decoded = try stripHtmlTags(allocator, "a &lt;b&gt; &amp; c");
+    defer allocator.free(decoded);
+    try std.testing.expectEqualStrings("a <b> & c", decoded);
+
+    // A bare '&' must not consume the rest of the text.
+    const bare = try stripHtmlTags(allocator, "Tom & Jerry");
+    defer allocator.free(bare);
+    try std.testing.expectEqualStrings("Tom & Jerry", bare);
 }
