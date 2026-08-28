@@ -561,6 +561,67 @@ pub fn formatJiraIssue(allocator: std.mem.Allocator, json_str: []const u8) ![]u8
     return output.toOwnedSlice();
 }
 
+/// Format the comments of a Jira issue as readable text.
+///
+/// The comment body is an ADF document on Jira Cloud and a plain string on
+/// Jira Server/DC, so both are handled.
+pub fn formatJiraComments(allocator: std.mem.Allocator, json_str: []const u8, issue_key: []const u8) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return try allocator.dupe(u8, "No comments found.\n");
+    const comments = parsed.value.object.get("comments") orelse
+        return try allocator.dupe(u8, "No comments found.\n");
+    if (comments != .array) return try allocator.dupe(u8, "No comments found.\n");
+    const items = comments.array.items;
+
+    var output: std.Io.Writer.Allocating = try .initCapacity(allocator, 1024);
+    errdefer output.deinit();
+    const writer = &output.writer;
+
+    try writer.print("Comments for {s} ({d} comment{s})\n", .{
+        issue_key,
+        items.len,
+        if (items.len == 1) @as([]const u8, "") else "s",
+    });
+    try writer.writeAll("─────────────────────────────────────────\n");
+
+    for (items) |comment| {
+        if (comment != .object) continue;
+        const obj = comment.object;
+
+        if (stringField(obj, "created")) |created| {
+            // "2026-08-27T12:34:56.789+0000" -> "2026-08-27 12:34"
+            if (created.len >= 16) {
+                try writer.print("{s} {s}", .{ created[0..10], created[11..16] });
+            } else {
+                try writer.writeAll(created);
+            }
+        }
+
+        if (obj.get("author")) |author| {
+            if (author == .object) {
+                if (stringField(author.object, "displayName")) |name| {
+                    try writer.print(" — {s}", .{name});
+                }
+            }
+        }
+        try writer.writeAll(":\n");
+
+        if (obj.get("body")) |body| {
+            switch (body) {
+                .string => |text| try writer.writeAll(text),
+                .object => try writeAdfText(writer, body),
+                else => {},
+            }
+        }
+
+        try writer.writeAll("\n");
+    }
+
+    return output.toOwnedSlice();
+}
+
 /// Format Confluence page as readable text
 /// base_url: Atlassian base URL (e.g. https://your-domain.atlassian.net)
 pub fn formatConfluencePage(allocator: std.mem.Allocator, json_str: []const u8, base_url: []const u8) ![]u8 {
@@ -768,4 +829,65 @@ test "stripHtmlTags decodes entities without swallowing bare ampersands" {
     const bare = try stripHtmlTags(allocator, "Tom & Jerry");
     defer allocator.free(bare);
     try std.testing.expectEqualStrings("Tom & Jerry", bare);
+}
+
+test "formatJiraComments renders ADF bodies with author and date" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "comments": [
+        \\    {
+        \\      "created": "2026-08-27T12:34:56.789+0000",
+        \\      "author": { "displayName": "Ada Lovelace" },
+        \\      "body": {
+        \\        "type": "doc",
+        \\        "content": [
+        \\          { "type": "paragraph", "content": [{ "type": "text", "text": "Looks good to me." }] }
+        \\        ]
+        \\      }
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    const formatted = try formatJiraComments(allocator, json, "PROJ-1");
+    defer allocator.free(formatted);
+
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "Comments for PROJ-1 (1 comment)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "2026-08-27 12:34") != null);
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "Ada Lovelace") != null);
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "Looks good to me.") != null);
+}
+
+test "formatJiraComments renders the plain string bodies Jira Server returns" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "comments": [
+        \\    { "created": "2026-08-27T09:00:00.000+0000",
+        \\      "author": { "displayName": "Grace Hopper" },
+        \\      "body": "Plain text comment" },
+        \\    { "created": "2026-08-27T10:00:00.000+0000",
+        \\      "author": { "displayName": "Alan Turing" },
+        \\      "body": "Second one" }
+        \\  ]
+        \\}
+    ;
+
+    const formatted = try formatJiraComments(allocator, json, "PROJ-2");
+    defer allocator.free(formatted);
+
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "(2 comments)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "Plain text comment") != null);
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "Second one") != null);
+}
+
+test "formatJiraComments tolerates responses without a comments array" {
+    const allocator = std.testing.allocator;
+
+    for ([_][]const u8{ "{}", "{\"comments\": null}", "{\"errorMessages\": [\"nope\"]}", "[]" }) |json| {
+        const formatted = try formatJiraComments(allocator, json, "PROJ-3");
+        defer allocator.free(formatted);
+        try std.testing.expectEqualStrings("No comments found.\n", formatted);
+    }
 }
