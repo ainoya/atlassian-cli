@@ -53,7 +53,7 @@ fn tagNameIs(trimmed: []const u8, name: []const u8) bool {
 ///   <img src="url">         ->  [image: url]
 /// Other tags are dropped, and the basic named entities are decoded.
 fn stripHtmlTags(allocator: std.mem.Allocator, html: []const u8) ![]u8 {
-    var result = std.ArrayList(u8).initCapacity(allocator, html.len) catch return try allocator.dupe(u8, html);
+    var result = try std.ArrayList(u8).initCapacity(allocator, html.len);
     errdefer result.deinit(allocator);
 
     // href of the <a> currently open, and where its text began in `result`.
@@ -913,6 +913,9 @@ test "formatJiraIssue renders an ADF description" {
     try std.testing.expect(std.mem.indexOf(u8, formatted, "Issue: PROJ-1") != null);
     try std.testing.expect(std.mem.indexOf(u8, formatted, "First line.") != null);
     try std.testing.expect(std.mem.indexOf(u8, formatted, "See the docs (https://example.com/docs)") != null);
+
+    // Block boundaries must survive: paragraphs are separated, not run together.
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "First line.\nSee the docs") != null);
 }
 
 test "formatJiraIssue still renders a plain string description" {

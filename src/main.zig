@@ -270,11 +270,18 @@ fn expandConfluenceLink(
 
     if (remaining_depth <= 1) return;
 
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, page_response, .{}) catch return;
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, page_response, .{}) catch |err| {
+        std.debug.print("Warning: could not parse Confluence page {s}, not following its links: {t}\n", .{ page_id, err });
+        return;
+    };
     defer parsed.deinit();
 
+    // A page with no storage body simply has no links to follow.
     const storage = pageStorageBody(parsed.value) orelse return;
-    const child_urls = formatter.extractHtmlUrls(allocator, storage) catch return;
+    const child_urls = formatter.extractHtmlUrls(allocator, storage) catch |err| {
+        std.debug.print("Warning: could not read the links on Confluence page {s}: {t}\n", .{ page_id, err });
+        return;
+    };
     defer {
         for (child_urls) |u| allocator.free(u);
         allocator.free(child_urls);
