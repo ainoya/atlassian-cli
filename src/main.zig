@@ -22,6 +22,7 @@ const JiraCommand = enum {
     boards,
     sprints,
     @"sprint-issues",
+    comments,
     user,
     help,
 };
@@ -69,6 +70,7 @@ fn printHelp() !void {
         \\  boards [--type=scrum]             List agile boards
         \\  sprints <board-id> [--state=active] List sprints
         \\  sprint-issues <sprint-id> [--max=50] Get issues in sprint
+        \\  comments <issue-key>               Get issue comments
         \\  user                               Get current user info
         \\
         \\Confluence Commands:
@@ -106,6 +108,7 @@ fn printJiraHelp() !void {
         \\  boards [--type=scrum]             List agile boards
         \\  sprints <board-id> [--state=active] List sprints
         \\  sprint-issues <sprint-id> [--max=50] Get issues in sprint
+        \\  comments <issue-key>               Get issue comments
         \\  user                               Get current user info
         \\
         \\JQL Examples:
@@ -189,7 +192,12 @@ fn handleJiraCommand(allocator: std.mem.Allocator, client: *AtlassianClient, arg
                 std.debug.print("Usage: jira issue <issue-key> [--format=text|json]\n", .{});
                 return;
             }
-            const response = try jira.getIssue(args[1], null);
+            // JSON consumers get the comments inline, saving a second call.
+            // The text view keeps its existing shape and uses `jira comments`.
+            const json_fields = "summary,description,status,assignee,reporter," ++
+                "labels,priority,created,updated,issuetype,comment";
+            const fields: ?[]const u8 = if (output_format == .json) json_fields else null;
+            const response = try jira.getIssue(args[1], fields);
             defer allocator.free(response);
 
             if (output_format == .text) {
@@ -291,6 +299,22 @@ fn handleJiraCommand(allocator: std.mem.Allocator, client: *AtlassianClient, arg
             const response = try jira.getSprintIssues(args[1], max_results);
             defer allocator.free(response);
             std.debug.print("{s}\n", .{response});
+        },
+        .comments => {
+            if (args.len < 2) {
+                std.debug.print("Usage: jira comments <issue-key> [--format=text|json]\n", .{});
+                return;
+            }
+            const response = try jira.getComments(args[1]);
+            defer allocator.free(response);
+
+            if (output_format == .text) {
+                const formatted = try formatter.formatJiraComments(allocator, response, args[1]);
+                defer allocator.free(formatted);
+                std.debug.print("{s}", .{formatted});
+            } else {
+                std.debug.print("{s}\n", .{response});
+            }
         },
         .user => {
             const response = try jira.getCurrentUser();
