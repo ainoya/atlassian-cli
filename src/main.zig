@@ -65,6 +65,7 @@ fn printHelp() !void {
         \\  --format=text            Output format: text (default) or json
         \\  --format=json            Raw JSON output
         \\  --full-content           Show full content (default shows preview only)
+        \\  --expand-links[=N]       jira issue: also print the Confluence pages it links to (N=depth, max 3)
         \\
         \\Jira Commands:
         \\  issue <key>                        Get issue details (e.g., PROJECT-123)
@@ -174,7 +175,165 @@ fn printConfluenceHelp() !void {
     std.debug.print("{s}\n", .{help});
 }
 
-fn handleJiraCommand(allocator: std.mem.Allocator, client: *AtlassianClient, args: []const [:0]const u8) !void {
+/// Everything the Confluence side of the CLI needs, resolved once in main().
+/// Jira commands carry it too, so `--expand-links` can reach a Confluence that
+/// lives on a different host under different credentials.
+const ConfluenceContext = struct {
+    client: *AtlassianClient,
+    base_url: []const u8,
+    base_path: []const u8,
+};
+
+/// Parse `--expand-links` / `--expand-links=N`. Null when absent. The depth is
+/// clamped: each level fans out over every link on every page fetched, so an
+/// unbounded value turns one command into a crawl of the whole space.
+const max_expand_depth = 3;
+
+fn parseExpandLinksDepth(args: []const [:0]const u8) ?usize {
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--expand-links")) return 1;
+        if (std.mem.startsWith(u8, arg, "--expand-links=")) {
+            const raw = arg["--expand-links=".len..];
+            const parsed = std.fmt.parseInt(usize, raw, 10) catch 1;
+            return @max(1, @min(parsed, max_expand_depth));
+        }
+    }
+    return null;
+}
+
+/// Total pages a single command may fetch while expanding, so a page that links
+/// to hundreds of others cannot turn into hundreds of requests.
+const max_expanded_pages = 20;
+
+/// The page id of `url` when it points at a page on the configured Confluence
+/// host, otherwise null.
+///
+/// The host check is the point: a Jira description can link anywhere, and a URL
+/// merely containing "/pages/<digits>" is not reason enough to send credentials
+/// at it.
+fn confluencePageIdFor(confluence_base_url: []const u8, url: []const u8) ?[]const u8 {
+    var host = confluence_base_url;
+    while (host.len > 0 and host[host.len - 1] == '/') host = host[0 .. host.len - 1];
+    if (host.len == 0) return null;
+    if (!std.mem.startsWith(u8, url, host)) return null;
+
+    // The prefix has to end at a path boundary, or "https://example.atlassian.net"
+    // would also match "https://example.atlassian.net.evil.com/...".
+    const rest = url[host.len..];
+    if (rest.len > 0 and rest[0] != '/') return null;
+
+    return formatter.extractConfluencePageId(rest);
+}
+
+/// Fetch a linked Confluence page, print it, and follow its own links while
+/// depth and the page budget allow.
+fn expandConfluenceLink(
+    allocator: std.mem.Allocator,
+    confluence: *ConfluenceClient,
+    ctx: ConfluenceContext,
+    url: []const u8,
+    page_id: []const u8,
+    remaining_depth: usize,
+    visited: *std.ArrayList([]u8),
+) void {
+    if (remaining_depth == 0) return;
+    if (visited.items.len >= max_expanded_pages) return;
+
+    for (visited.items) |seen| {
+        if (std.mem.eql(u8, seen, page_id)) return;
+    }
+
+    const owned_id = allocator.dupe(u8, page_id) catch return;
+    visited.append(allocator, owned_id) catch {
+        allocator.free(owned_id);
+        return;
+    };
+
+    const page_response = confluence.getPage(page_id) catch |err| {
+        std.debug.print("Warning: could not fetch Confluence page {s}: {t}\n", .{ page_id, err });
+        return;
+    };
+    defer allocator.free(page_response);
+
+    const page_formatted = formatter.formatConfluencePage(
+        allocator,
+        page_response,
+        ctx.base_url,
+        ctx.base_path,
+    ) catch |err| {
+        std.debug.print("Warning: could not format Confluence page {s}: {t}\n", .{ page_id, err });
+        return;
+    };
+    defer allocator.free(page_formatted);
+
+    std.debug.print("\n── Linked: {s} ──\n\n{s}", .{ url, page_formatted });
+
+    if (remaining_depth <= 1) return;
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, page_response, .{}) catch return;
+    defer parsed.deinit();
+
+    const storage = pageStorageBody(parsed.value) orelse return;
+    const child_urls = formatter.extractHtmlUrls(allocator, storage) catch return;
+    defer {
+        for (child_urls) |u| allocator.free(u);
+        allocator.free(child_urls);
+    }
+
+    for (child_urls) |child_url| {
+        const child_id = confluencePageIdFor(ctx.base_url, child_url) orelse continue;
+        expandConfluenceLink(allocator, confluence, ctx, child_url, child_id, remaining_depth - 1, visited);
+    }
+}
+
+/// body.storage.value of a Confluence page response, when present.
+fn pageStorageBody(page: std.json.Value) ?[]const u8 {
+    if (page != .object) return null;
+    const body = page.object.get("body") orelse return null;
+    if (body != .object) return null;
+    const storage = body.object.get("storage") orelse return null;
+    if (storage != .object) return null;
+    const value = storage.object.get("value") orelse return null;
+    return if (value == .string) value.string else null;
+}
+
+/// Print the Confluence pages a Jira issue's description links to.
+fn expandIssueLinks(
+    allocator: std.mem.Allocator,
+    ctx: ConfluenceContext,
+    issue_response: []const u8,
+    depth: usize,
+) !void {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, issue_response, .{});
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return;
+    const fields = parsed.value.object.get("fields") orelse return;
+    if (fields != .object) return;
+    const description = fields.object.get("description") orelse return;
+    if (description != .object) return;
+
+    const urls = try formatter.extractAdfUrls(allocator, description);
+    defer {
+        for (urls) |url| allocator.free(url);
+        allocator.free(urls);
+    }
+
+    var confluence = ConfluenceClient.init(ctx.client, allocator, ctx.base_path);
+
+    var visited = try std.ArrayList([]u8).initCapacity(allocator, 16);
+    defer {
+        for (visited.items) |id| allocator.free(id);
+        visited.deinit(allocator);
+    }
+
+    for (urls) |url| {
+        const page_id = confluencePageIdFor(ctx.base_url, url) orelse continue;
+        expandConfluenceLink(allocator, &confluence, ctx, url, page_id, depth, &visited);
+    }
+}
+
+fn handleJiraCommand(allocator: std.mem.Allocator, client: *AtlassianClient, confluence: ConfluenceContext, args: []const [:0]const u8) !void {
     if (args.len < 1) {
         try printJiraHelp();
         return;
@@ -193,7 +352,7 @@ fn handleJiraCommand(allocator: std.mem.Allocator, client: *AtlassianClient, arg
         .help => try printJiraHelp(),
         .issue => {
             if (args.len < 2) {
-                std.debug.print("Usage: jira issue <issue-key> [--format=text|json]\n", .{});
+                std.debug.print("Usage: jira issue <issue-key> [--format=text|json] [--expand-links[=N]]\n", .{});
                 return;
             }
             // JSON consumers get the comments inline, saving a second call.
@@ -208,6 +367,10 @@ fn handleJiraCommand(allocator: std.mem.Allocator, client: *AtlassianClient, arg
                 const formatted = try formatter.formatJiraIssue(allocator, response);
                 defer allocator.free(formatted);
                 std.debug.print("{s}", .{formatted});
+
+                if (parseExpandLinksDepth(args)) |depth| {
+                    try expandIssueLinks(allocator, confluence, response, depth);
+                }
             } else {
                 std.debug.print("{s}\n", .{response});
             }
@@ -329,7 +492,9 @@ fn handleJiraCommand(allocator: std.mem.Allocator, client: *AtlassianClient, arg
 }
 
 /// Modify Confluence command handler to pass base URL
-fn handleConfluenceCommand(allocator: std.mem.Allocator, environ: std.process.Environ, client: *AtlassianClient, args: []const [:0]const u8, base_url: []const u8) !void {
+fn handleConfluenceCommand(allocator: std.mem.Allocator, ctx: ConfluenceContext, args: []const [:0]const u8) !void {
+    const base_url = ctx.base_url;
+    const confluence_base_path = ctx.base_path;
     if (args.len < 1) {
         try printConfluenceHelp();
         return;
@@ -341,11 +506,7 @@ fn handleConfluenceCommand(allocator: std.mem.Allocator, environ: std.process.En
         return;
     };
 
-    // Get Confluence base path (default: /wiki for Confluence Cloud)
-    const confluence_base_path = environ.getAlloc(allocator, "CONFLUENCE_BASE_PATH") catch "/wiki";
-    defer if (!std.mem.eql(u8, confluence_base_path, "/wiki")) allocator.free(confluence_base_path);
-
-    var confluence = ConfluenceClient.init(client, allocator, confluence_base_path);
+    var confluence = ConfluenceClient.init(ctx.client, allocator, confluence_base_path);
 
     const output_format = parseOutputFormat(args);
     const show_full_content = hasFullContentFlag(args);
@@ -648,34 +809,45 @@ pub fn main(init: std.process.Init) !void {
     const jira_api_version = resolveJiraApiVersion(env_api_version, is_cloud);
 
     // Initialize client
-    var client = switch (service) {
-        .confluence => AtlassianClient.init(
-            allocator,
-            io,
-            confluence_url,
-            confluence_username,
-            confluence_api_token,
-            jira_api_version,
-            is_cloud,
-        ),
-        else => AtlassianClient.init(
-            allocator,
-            io,
-            base_url,
-            username,
-            api_token,
-            jira_api_version,
-            is_cloud,
-        ),
+    const env_base_path = environ.getAlloc(allocator, "CONFLUENCE_BASE_PATH") catch null;
+    defer if (env_base_path) |e| allocator.free(e);
+    // An empty CONFLUENCE_BASE_PATH is meaningful: a Server/DC instance served
+    // at the root. Only an unset variable falls back to the Cloud default.
+    const confluence_base_path = env_base_path orelse "/wiki";
+
+    var jira_client = AtlassianClient.init(
+        allocator,
+        io,
+        base_url,
+        username,
+        api_token,
+        jira_api_version,
+        is_cloud,
+    );
+    defer jira_client.deinit();
+
+    // Built for both services: Jira commands need it for --expand-links, and
+    // it addresses the Confluence host and credentials either way.
+    var confluence_client = AtlassianClient.init(
+        allocator,
+        io,
+        confluence_url,
+        confluence_username,
+        confluence_api_token,
+        jira_api_version,
+        is_cloud,
+    );
+    defer confluence_client.deinit();
+
+    const confluence_ctx: ConfluenceContext = .{
+        .client = &confluence_client,
+        .base_url = confluence_url,
+        .base_path = confluence_base_path,
     };
 
-    defer client.deinit();
-
-    // Dispatch to service handler
-    // Pass base URL to Confluence command to dynamically generate URL
     switch (service) {
-        .jira => try handleJiraCommand(allocator, &client, args[2..]),
-        .confluence => try handleConfluenceCommand(allocator, environ, &client, args[2..], confluence_url),
+        .jira => try handleJiraCommand(allocator, &jira_client, confluence_ctx, args[2..]),
+        .confluence => try handleConfluenceCommand(allocator, confluence_ctx, args[2..]),
         .config => {}, // Handled above
     }
 }
@@ -699,4 +871,45 @@ test "nonEmptyOr falls back for unset and empty values" {
     try std.testing.expectEqualStrings("fallback", nonEmptyOr(null, "fallback"));
     try std.testing.expectEqualStrings("fallback", nonEmptyOr("", "fallback"));
     try std.testing.expectEqualStrings("set", nonEmptyOr("set", "fallback"));
+}
+
+test "parseExpandLinksDepth clamps the requested depth" {
+    const bare = [_][:0]const u8{ "issue", "PROJ-1", "--expand-links" };
+    const two = [_][:0]const u8{ "issue", "PROJ-1", "--expand-links=2" };
+    const huge = [_][:0]const u8{ "issue", "PROJ-1", "--expand-links=99" };
+    const zero = [_][:0]const u8{ "issue", "PROJ-1", "--expand-links=0" };
+    const junk = [_][:0]const u8{ "issue", "PROJ-1", "--expand-links=deep" };
+    const absent = [_][:0]const u8{ "issue", "PROJ-1" };
+
+    try std.testing.expectEqual(@as(?usize, 1), parseExpandLinksDepth(&bare));
+    try std.testing.expectEqual(@as(?usize, 2), parseExpandLinksDepth(&two));
+    try std.testing.expectEqual(@as(?usize, max_expand_depth), parseExpandLinksDepth(&huge));
+    try std.testing.expectEqual(@as(?usize, 1), parseExpandLinksDepth(&zero));
+    try std.testing.expectEqual(@as(?usize, 1), parseExpandLinksDepth(&junk));
+    try std.testing.expectEqual(@as(?usize, null), parseExpandLinksDepth(&absent));
+}
+
+test "confluencePageIdFor only expands links on the configured host" {
+    const host = "https://example.atlassian.net";
+
+    try std.testing.expectEqualStrings(
+        "12345",
+        confluencePageIdFor(host, "https://example.atlassian.net/wiki/spaces/OPS/pages/12345/Runbook").?,
+    );
+
+    // A trailing slash in the configured URL must not defeat the match.
+    try std.testing.expectEqualStrings(
+        "12345",
+        confluencePageIdFor("https://example.atlassian.net/", "https://example.atlassian.net/wiki/spaces/OPS/pages/12345").?,
+    );
+
+    // Somewhere else entirely, even though it looks like a Confluence URL.
+    try std.testing.expect(confluencePageIdFor(host, "https://evil.example.com/wiki/spaces/X/pages/12345") == null);
+
+    // A lookalike host that merely starts with the configured one is not it.
+    try std.testing.expect(confluencePageIdFor(host, "https://example.atlassian.net.evil.com/wiki/spaces/X/pages/12345") == null);
+
+    // On the right host but not a page link.
+    try std.testing.expect(confluencePageIdFor(host, "https://example.atlassian.net/browse/PROJ-1") == null);
+    try std.testing.expect(confluencePageIdFor(host, "https://example.atlassian.net/wiki/spaces/OPS/pages/") == null);
 }
