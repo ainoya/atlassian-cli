@@ -66,7 +66,24 @@ export ATLASSIAN_URL="https://your-domain.atlassian.net"
 export ATLASSIAN_USERNAME="your-email@example.com"
 export ATLASSIAN_API_TOKEN="your-api-token"
 export ATLASSIAN_CLOUD="true"  # true for Cloud, false for Server/DC
+export ATLASSIAN_JIRA_API_VERSION="3"  # optional: 2, 3 or latest
+
+# Confluence-specific settings, each falling back to the ATLASSIAN_* value above
+export CONFLUENCE_URL="https://your-confluence-host.example.com"
+export CONFLUENCE_USERNAME="your-email@example.com"
+export CONFLUENCE_API_TOKEN="your-confluence-token"
+export CONFLUENCE_BASE_PATH="/wiki"
 ```
+
+If `ATLASSIAN_JIRA_API_VERSION` is unset, the CLI addresses v3 on Atlassian Cloud
+and v2 on Jira Server/Data Center. Set it to `2`, `3` or `latest` to override;
+any other value is ignored with a warning.
+
+The `CONFLUENCE_*` variables only matter when Confluence is a separate
+deployment from Jira — a different host, or its own credentials. Unset ones fall
+back to `ATLASSIAN_URL`, `ATLASSIAN_USERNAME` and `ATLASSIAN_API_TOKEN`. Set
+`CONFLUENCE_BASE_PATH` to an empty string for a Server/DC instance served at the
+root rather than under `/wiki`.
 
 ### Creating an API Token
 
@@ -84,6 +101,7 @@ export ATLASSIAN_URL="https://your-domain.atlassian.net"
 export ATLASSIAN_USERNAME="your-email@example.com"
 export ATLASSIAN_API_TOKEN="your-api-token"
 export ATLASSIAN_CLOUD="true"
+export ATLASSIAN_JIRA_API_VERSION="3"  # optional: 2, 3 or latest
 ```
 
 Then run:

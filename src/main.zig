@@ -51,10 +51,14 @@ fn printHelp() !void {
         \\  config        Configuration management
         \\
         \\Environment Variables (required if not set in config):
-        \\  ATLASSIAN_URL            Your Atlassian instance URL (e.g., https://your-domain.atlassian.net)
+        \\  ATLASSIAN_URL            Jira instance URL (e.g., https://your-domain.atlassian.net)
         \\  ATLASSIAN_USERNAME       Your email address
         \\  ATLASSIAN_API_TOKEN      Your API token
         \\  ATLASSIAN_CLOUD          Set to 'true' for Cloud, 'false' for Server/DC (default: true)
+        \\  ATLASSIAN_JIRA_API_VERSION  Jira REST API version: 2, 3 or latest (default: 3 on Cloud, 2 on Server/DC)
+        \\  CONFLUENCE_URL           Confluence base URL (falls back to ATLASSIAN_URL)
+        \\  CONFLUENCE_USERNAME      Confluence username (falls back to ATLASSIAN_USERNAME)
+        \\  CONFLUENCE_API_TOKEN     Confluence API token (falls back to ATLASSIAN_API_TOKEN)
         \\  CONFLUENCE_BASE_PATH     Confluence API base path (default: /wiki)
         \\
         \\Common Options:
@@ -358,7 +362,7 @@ fn handleConfluenceCommand(allocator: std.mem.Allocator, environ: std.process.En
 
             if (output_format == .text) {
                 // Pass base URL to formatter to dynamically generate page URL
-                const formatted = try formatter.formatConfluencePage(allocator, response, base_url);
+                const formatted = try formatter.formatConfluencePage(allocator, response, base_url, confluence_base_path);
                 defer allocator.free(formatted);
                 std.debug.print("{s}", .{formatted});
             } else {
@@ -378,7 +382,7 @@ fn handleConfluenceCommand(allocator: std.mem.Allocator, environ: std.process.En
             defer allocator.free(response);
 
             if (output_format == .text) {
-                const formatted = try formatter.formatConfluenceSearchResults(allocator, response, show_full_content);
+                const formatted = try formatter.formatConfluenceSearchResults(allocator, response, base_url, confluence_base_path, show_full_content);
                 defer allocator.free(formatted);
                 std.debug.print("{s}", .{formatted});
             } else {
@@ -398,7 +402,7 @@ fn handleConfluenceCommand(allocator: std.mem.Allocator, environ: std.process.En
             defer allocator.free(response);
 
             if (output_format == .text) {
-                const formatted = try formatter.formatConfluenceSearchResults(allocator, response, show_full_content);
+                const formatted = try formatter.formatConfluenceSearchResults(allocator, response, base_url, confluence_base_path, show_full_content);
                 defer allocator.free(formatted);
                 std.debug.print("{s}", .{formatted});
             } else {
@@ -450,7 +454,7 @@ fn handleConfluenceCommand(allocator: std.mem.Allocator, environ: std.process.En
             defer allocator.free(response);
 
             if (output_format == .text) {
-                const formatted = try formatter.formatConfluenceSearchResults(allocator, response, show_full_content);
+                const formatted = try formatter.formatConfluenceSearchResults(allocator, response, base_url, confluence_base_path, show_full_content);
                 defer allocator.free(formatted);
                 std.debug.print("{s}", .{formatted});
             } else {
@@ -490,6 +494,33 @@ fn handleConfluenceCommand(allocator: std.mem.Allocator, environ: std.process.En
             }
         },
     }
+}
+
+/// The environment value when it is set and non-empty, otherwise the fallback.
+fn nonEmptyOr(value: ?[]const u8, fallback: []const u8) []const u8 {
+    if (value) |v| {
+        if (v.len > 0) return v;
+    }
+    return fallback;
+}
+
+/// Jira Cloud speaks v3, Server/DC speaks v2. ATLASSIAN_JIRA_API_VERSION
+/// overrides that, but only with a version this CLI knows how to address —
+/// anything else would be pasted straight into the request path.
+fn resolveJiraApiVersion(override: ?[]const u8, is_cloud: bool) []const u8 {
+    const default: []const u8 = if (is_cloud) "3" else "2";
+    const requested = override orelse return default;
+    if (requested.len == 0) return default;
+
+    for ([_][]const u8{ "2", "3", "latest" }) |supported| {
+        if (std.mem.eql(u8, requested, supported)) return supported;
+    }
+
+    std.debug.print(
+        "Warning: ignoring ATLASSIAN_JIRA_API_VERSION={s}; expected 2, 3 or latest. Using {s}.\n",
+        .{ requested, default },
+    );
+    return default;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -599,8 +630,44 @@ pub fn main(init: std.process.Init) !void {
     defer if (!std.mem.eql(u8, is_cloud_str, "true")) allocator.free(is_cloud_str);
     const is_cloud = std.mem.eql(u8, is_cloud_str, "true");
 
+    // Confluence may live on a different host, under different credentials,
+    // from Jira. Each falls back to the shared ATLASSIAN_* value.
+    const env_confluence_url = environ.getAlloc(allocator, "CONFLUENCE_URL") catch null;
+    defer if (env_confluence_url) |e| allocator.free(e);
+    const env_confluence_username = environ.getAlloc(allocator, "CONFLUENCE_USERNAME") catch null;
+    defer if (env_confluence_username) |e| allocator.free(e);
+    const env_confluence_token = environ.getAlloc(allocator, "CONFLUENCE_API_TOKEN") catch null;
+    defer if (env_confluence_token) |e| allocator.free(e);
+
+    const confluence_url = nonEmptyOr(env_confluence_url, base_url);
+    const confluence_username = nonEmptyOr(env_confluence_username, username);
+    const confluence_api_token = nonEmptyOr(env_confluence_token, api_token);
+
+    const env_api_version = environ.getAlloc(allocator, "ATLASSIAN_JIRA_API_VERSION") catch null;
+    defer if (env_api_version) |e| allocator.free(e);
+    const jira_api_version = resolveJiraApiVersion(env_api_version, is_cloud);
+
     // Initialize client
-    var client = AtlassianClient.init(allocator, io, base_url, username, api_token, is_cloud);
+    var client = switch (service) {
+        .confluence => AtlassianClient.init(
+            allocator,
+            io,
+            confluence_url,
+            confluence_username,
+            confluence_api_token,
+            jira_api_version,
+            is_cloud,
+        ),
+        else => AtlassianClient.init(
+            allocator,
+            io,
+            base_url,
+            username,
+            api_token,
+            jira_api_version,
+            is_cloud,
+        ),
+    };
 
     defer client.deinit();
 
@@ -608,7 +675,28 @@ pub fn main(init: std.process.Init) !void {
     // Pass base URL to Confluence command to dynamically generate URL
     switch (service) {
         .jira => try handleJiraCommand(allocator, &client, args[2..]),
-        .confluence => try handleConfluenceCommand(allocator, environ, &client, args[2..], base_url),
+        .confluence => try handleConfluenceCommand(allocator, environ, &client, args[2..], confluence_url),
         .config => {}, // Handled above
     }
+}
+
+test "resolveJiraApiVersion defaults per deployment and validates overrides" {
+    // Cloud speaks v3, Server/DC speaks v2, when nothing is set.
+    try std.testing.expectEqualStrings("3", resolveJiraApiVersion(null, true));
+    try std.testing.expectEqualStrings("2", resolveJiraApiVersion(null, false));
+
+    // Supported overrides win.
+    try std.testing.expectEqualStrings("2", resolveJiraApiVersion("2", true));
+    try std.testing.expectEqualStrings("latest", resolveJiraApiVersion("latest", false));
+
+    // Anything else falls back rather than reaching the request path.
+    try std.testing.expectEqualStrings("3", resolveJiraApiVersion("4", true));
+    try std.testing.expectEqualStrings("2", resolveJiraApiVersion("../../admin", false));
+    try std.testing.expectEqualStrings("3", resolveJiraApiVersion("", true));
+}
+
+test "nonEmptyOr falls back for unset and empty values" {
+    try std.testing.expectEqualStrings("fallback", nonEmptyOr(null, "fallback"));
+    try std.testing.expectEqualStrings("fallback", nonEmptyOr("", "fallback"));
+    try std.testing.expectEqualStrings("set", nonEmptyOr("set", "fallback"));
 }

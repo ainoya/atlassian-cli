@@ -6,6 +6,11 @@ export ATLASSIAN_URL="https://your-domain.atlassian.net"
 export ATLASSIAN_USERNAME="your-email@example.com"
 export ATLASSIAN_API_TOKEN="your-api-token-here"
 export ATLASSIAN_CLOUD="true"  # true for Cloud, false for Server/DC
+export ATLASSIAN_JIRA_API_VERSION="3"  # Optional: 2, 3 or latest. Defaults to 3 on Cloud, 2 on Server/DC
 
-# Confluence-specific settings
-export CONFLUENCE_BASE_PATH="/wiki"  # Default for Confluence Cloud
+# Confluence-specific settings. Each falls back to the ATLASSIAN_* value above,
+# so only set these when Confluence lives somewhere else or wants its own token.
+export CONFLUENCE_URL="https://your-domain.atlassian.net"
+export CONFLUENCE_USERNAME="your-email@example.com"
+export CONFLUENCE_API_TOKEN="your-api-token-here"
+export CONFLUENCE_BASE_PATH="/wiki"  # Default for Confluence Cloud; use "" for a Server/DC instance served at the root

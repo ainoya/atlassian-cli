@@ -6,6 +6,8 @@ pub const AtlassianClient = struct {
     base_url: []const u8,
     username: []const u8,
     api_token: []const u8,
+    /// Jira REST API version to address: "2", "3" or "latest".
+    jira_api_version: []const u8,
     http_client: std.http.Client,
     is_cloud: bool,
 
@@ -15,6 +17,7 @@ pub const AtlassianClient = struct {
         base_url: []const u8,
         username: []const u8,
         api_token: []const u8,
+        jira_api_version: []const u8,
         is_cloud: bool,
     ) AtlassianClient {
         return .{
@@ -23,6 +26,7 @@ pub const AtlassianClient = struct {
             .base_url = base_url,
             .username = username,
             .api_token = api_token,
+            .jira_api_version = jira_api_version,
             .http_client = std.http.Client{ .allocator = allocator, .io = io },
             .is_cloud = is_cloud,
         };
@@ -81,22 +85,23 @@ pub const AtlassianClient = struct {
             .response_writer = &response_writer.writer,
         });
 
+        const status_code = @intFromEnum(response.status);
         switch (response.status) {
-            .ok => {},
+            .ok, .created, .accepted, .no_content => {},
             .unauthorized => {
-                std.debug.print("Authentication failed. Check ATLASSIAN_USERNAME and ATLASSIAN_API_TOKEN\n", .{});
+                std.debug.print("Authentication failed ({d}). Check the configured username and API token\n", .{status_code});
                 return error.AuthenticationFailed;
             },
             .forbidden => {
-                std.debug.print("Permission denied. Check user permissions\n", .{});
+                std.debug.print("Permission denied ({d}). Check user permissions\n", .{status_code});
                 return error.PermissionDenied;
             },
             .not_found => {
-                std.debug.print("Resource not found\n", .{});
+                std.debug.print("Resource not found ({d}): {s}\n", .{ status_code, endpoint });
                 return error.NotFound;
             },
             else => {
-                std.debug.print("HTTP Error: {}\n", .{response.status});
+                std.debug.print("HTTP error {d} for {s}\n", .{ status_code, endpoint });
                 return error.HttpError;
             },
         }
@@ -113,6 +118,7 @@ test "create auth header" {
         "https://test.atlassian.net",
         "test@example.com",
         "test_token",
+        "3",
         true,
     );
     defer client.deinit();

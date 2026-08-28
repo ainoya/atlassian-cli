@@ -285,8 +285,23 @@ fn linkHref(obj: std.json.ObjectMap) ?[]const u8 {
     return null;
 }
 
+/// Normalise a Confluence base path for use in a browser URL: "/wiki" stays
+/// as is, a trailing slash is dropped, and "/" or empty becomes empty so a
+/// Server/DC instance served at the root does not gain a stray slash.
+fn confluenceUrlPrefix(base_path: []const u8) []const u8 {
+    if (base_path.len == 0 or std.mem.eql(u8, base_path, "/")) return "";
+    if (base_path[base_path.len - 1] == '/') return base_path[0 .. base_path.len - 1];
+    return base_path;
+}
+
 /// Format Confluence search results as readable text
-pub fn formatConfluenceSearchResults(allocator: std.mem.Allocator, json_str: []const u8, show_full_content: bool) ![]u8 {
+pub fn formatConfluenceSearchResults(
+    allocator: std.mem.Allocator,
+    json_str: []const u8,
+    base_url: []const u8,
+    base_path: []const u8,
+    show_full_content: bool,
+) ![]u8 {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
     defer parsed.deinit();
 
@@ -335,7 +350,12 @@ pub fn formatConfluenceSearchResults(allocator: std.mem.Allocator, json_str: []c
             if (obj.get("space")) |space| {
                 const space_obj = space.object;
                 if (space_obj.get("key")) |key| {
-                    try writer.print("    URL: https://.atlassian.net/wiki/spaces/{s}/pages/{s}\n", .{ key.string, page_id });
+                    try writer.print("    URL: {s}{s}/spaces/{s}/pages/{s}\n", .{
+                        base_url,
+                        confluenceUrlPrefix(base_path),
+                        key.string,
+                        page_id,
+                    });
                 }
             }
         }
@@ -624,7 +644,12 @@ pub fn formatJiraComments(allocator: std.mem.Allocator, json_str: []const u8, is
 
 /// Format Confluence page as readable text
 /// base_url: Atlassian base URL (e.g. https://your-domain.atlassian.net)
-pub fn formatConfluencePage(allocator: std.mem.Allocator, json_str: []const u8, base_url: []const u8) ![]u8 {
+pub fn formatConfluencePage(
+    allocator: std.mem.Allocator,
+    json_str: []const u8,
+    base_url: []const u8,
+    base_path: []const u8,
+) ![]u8 {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
     defer parsed.deinit();
 
@@ -671,7 +696,12 @@ pub fn formatConfluencePage(allocator: std.mem.Allocator, json_str: []const u8, 
             const space_obj = space.object;
             if (space_obj.get("key")) |key| {
                 // Dynamically generate Confluence page URL from base URL
-                try writer.print("URL: {s}/wiki/spaces/{s}/pages/{s}\n", .{ base_url, key.string, page_id });
+                try writer.print("URL: {s}{s}/spaces/{s}/pages/{s}\n", .{
+                    base_url,
+                    confluenceUrlPrefix(base_path),
+                    key.string,
+                    page_id,
+                });
             }
         }
     }
@@ -890,4 +920,41 @@ test "formatJiraComments tolerates responses without a comments array" {
         defer allocator.free(formatted);
         try std.testing.expectEqualStrings("No comments found.\n", formatted);
     }
+}
+
+test "confluenceUrlPrefix normalises the base path" {
+    try std.testing.expectEqualStrings("/wiki", confluenceUrlPrefix("/wiki"));
+    try std.testing.expectEqualStrings("/wiki", confluenceUrlPrefix("/wiki/"));
+    try std.testing.expectEqualStrings("", confluenceUrlPrefix(""));
+    try std.testing.expectEqualStrings("", confluenceUrlPrefix("/"));
+    try std.testing.expectEqualStrings("/confluence", confluenceUrlPrefix("/confluence"));
+}
+
+test "formatConfluencePage builds the page URL from the configured host" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{ "id": "12345", "title": "Runbook", "space": { "key": "OPS" } }
+    ;
+
+    const cloud = try formatConfluencePage(allocator, json, "https://example.atlassian.net", "/wiki");
+    defer allocator.free(cloud);
+    try std.testing.expect(std.mem.indexOf(u8, cloud, "https://example.atlassian.net/wiki/spaces/OPS/pages/12345") != null);
+
+    // A Server/DC instance served at the root must not gain a stray path.
+    const server = try formatConfluencePage(allocator, json, "https://wiki.example.com", "");
+    defer allocator.free(server);
+    try std.testing.expect(std.mem.indexOf(u8, server, "https://wiki.example.com/spaces/OPS/pages/12345") != null);
+}
+
+test "formatConfluenceSearchResults no longer emits a hardcoded host" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{ "results": [ { "id": "999", "title": "Page", "space": { "key": "OPS" } } ] }
+    ;
+
+    const formatted = try formatConfluenceSearchResults(allocator, json, "https://wiki.example.com", "/confluence", false);
+    defer allocator.free(formatted);
+
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "https://wiki.example.com/confluence/spaces/OPS/pages/999") != null);
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "https://.atlassian.net") == null);
 }
