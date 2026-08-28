@@ -13,6 +13,24 @@ pub const JiraClient = struct {
         };
     }
 
+    fn apiVersion(self: *const JiraClient) []const u8 {
+        return self.client.jira_api_version;
+    }
+
+    /// "/rest/api/<version><suffix>", e.g. "/rest/api/2/project".
+    fn writeApiPath(self: *const JiraClient, buffer: []u8, suffix: []const u8) ![]const u8 {
+        return try std.fmt.bufPrint(buffer, "/rest/api/{s}{s}", .{ self.apiVersion(), suffix });
+    }
+
+    /// Jira Cloud replaced /search with /search/jql in v3; Server/DC and the
+    /// older versions keep /search.
+    fn writeSearchEndpoint(self: *const JiraClient, buffer: []u8) ![]const u8 {
+        if (self.client.is_cloud and std.mem.eql(u8, self.apiVersion(), "3")) {
+            return "/rest/api/3/search/jql";
+        }
+        return try self.writeApiPath(buffer, "/search");
+    }
+
     /// Get issue by key (e.g., "PROJECT-123")
     pub fn getIssue(self: *JiraClient, issue_key: []const u8, fields: ?[]const u8) ![]u8 {
         var params_buffer: [1024]u8 = undefined;
@@ -22,7 +40,7 @@ pub const JiraClient = struct {
             "fields=summary,description,status,assignee,reporter,labels,priority,created,updated,issuetype";
 
         var endpoint_buffer: [256]u8 = undefined;
-        const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "/rest/api/3/issue/{s}", .{issue_key});
+        const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "/rest/api/{s}/issue/{s}", .{ self.apiVersion(), issue_key });
 
         return try self.client.makeRequest(.GET, endpoint, params);
     }
@@ -46,13 +64,15 @@ pub const JiraClient = struct {
 
         try writer.print("&maxResults={d}", .{max_results});
 
-        const endpoint = "/rest/api/3/search/jql";
+        var endpoint_buffer: [256]u8 = undefined;
+        const endpoint = try self.writeSearchEndpoint(&endpoint_buffer);
         return try self.client.makeRequest(.GET, endpoint, writer.buffered());
     }
 
     /// Get all projects
     pub fn getProjects(self: *JiraClient) ![]u8 {
-        const endpoint = "/rest/api/3/project";
+        var endpoint_buffer: [256]u8 = undefined;
+        const endpoint = try self.writeApiPath(&endpoint_buffer, "/project");
         return try self.client.makeRequest(.GET, endpoint, null);
     }
 
@@ -66,14 +86,14 @@ pub const JiraClient = struct {
     /// Get issue transitions (workflow states)
     pub fn getTransitions(self: *JiraClient, issue_key: []const u8) ![]u8 {
         var endpoint_buffer: [256]u8 = undefined;
-        const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "/rest/api/3/issue/{s}/transitions", .{issue_key});
+        const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "/rest/api/{s}/issue/{s}/transitions", .{ self.apiVersion(), issue_key });
         return try self.client.makeRequest(.GET, endpoint, null);
     }
 
     /// Get issue comments
     pub fn getComments(self: *JiraClient, issue_key: []const u8) ![]u8 {
         var endpoint_buffer: [256]u8 = undefined;
-        const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "/rest/api/3/issue/{s}/comment", .{issue_key});
+        const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "/rest/api/{s}/issue/{s}/comment", .{ self.apiVersion(), issue_key });
         return try self.client.makeRequest(.GET, endpoint, null);
     }
 
@@ -116,7 +136,8 @@ pub const JiraClient = struct {
 
     /// Get current user profile
     pub fn getCurrentUser(self: *JiraClient) ![]u8 {
-        const endpoint = if (self.client.is_cloud) "/rest/api/3/myself" else "/rest/api/2/myself";
+        var endpoint_buffer: [256]u8 = undefined;
+        const endpoint = try self.writeApiPath(&endpoint_buffer, "/myself");
         return try self.client.makeRequest(.GET, endpoint, null);
     }
 };
