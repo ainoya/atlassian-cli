@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.4](https://github.com/ainoya/atlassian-cli/compare/v0.0.3...v0.0.4) - 2026-08-28
+
+- Close the remaining gaps from the formatter review issues by @ainoya in https://github.com/ainoya/atlassian-cli/pull/21
+
 ## [v0.0.3](https://github.com/ainoya/atlassian-cli/compare/v0.0.2...v0.0.3) - 2026-08-28
 
 - Add CI, update GitHub Actions, and migrate to Zig 0.16 by @ainoya in https://github.com/ainoya/atlassian-cli/pull/14
