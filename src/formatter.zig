@@ -90,9 +90,9 @@ pub fn formatConfluenceSearchResults(allocator: std.mem.Allocator, json_str: []c
     const root = parsed.value.object;
     const results = root.get("results") orelse return try allocator.dupe(u8, "No results found.\n");
 
-    var output = try std.ArrayList(u8).initCapacity(allocator, 1024);
-    errdefer output.deinit(allocator);
-    const writer = output.writer(allocator);
+    var output: std.Io.Writer.Allocating = try .initCapacity(allocator, 1024);
+    errdefer output.deinit();
+    const writer = &output.writer;
 
     const results_array = results.array;
     try writer.print("Found {} result(s):\n\n", .{results_array.items.len});
@@ -174,7 +174,7 @@ pub fn formatConfluenceSearchResults(allocator: std.mem.Allocator, json_str: []c
         try writer.writeAll("\n");
     }
 
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 /// Format Jira search results as readable text
@@ -185,9 +185,9 @@ pub fn formatJiraSearchResults(allocator: std.mem.Allocator, json_str: []const u
     const root = parsed.value.object;
     const issues = root.get("issues") orelse return try allocator.dupe(u8, "No issues found.\n");
 
-    var output = try std.ArrayList(u8).initCapacity(allocator, 1024);
-    errdefer output.deinit(allocator);
-    const writer = output.writer(allocator);
+    var output: std.Io.Writer.Allocating = try .initCapacity(allocator, 1024);
+    errdefer output.deinit();
+    const writer = &output.writer;
 
     const issues_array = issues.array;
     const total: usize = if (root.get("total")) |t| @intCast(t.integer) else issues_array.items.len;
@@ -242,7 +242,7 @@ pub fn formatJiraSearchResults(allocator: std.mem.Allocator, json_str: []const u
         try writer.writeAll("\n");
     }
 
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 /// Format Jira issue details as readable text
@@ -252,9 +252,9 @@ pub fn formatJiraIssue(allocator: std.mem.Allocator, json_str: []const u8) ![]u8
 
     const root = parsed.value.object;
 
-    var output = try std.ArrayList(u8).initCapacity(allocator, 1024);
-    errdefer output.deinit(allocator);
-    const writer = output.writer(allocator);
+    var output: std.Io.Writer.Allocating = try .initCapacity(allocator, 1024);
+    errdefer output.deinit();
+    const writer = &output.writer;
 
     // Key
     const key = if (root.get("key")) |k| k.string else "UNKNOWN";
@@ -345,7 +345,7 @@ pub fn formatJiraIssue(allocator: std.mem.Allocator, json_str: []const u8) ![]u8
         }
     }
 
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 /// Format Confluence page as readable text
@@ -356,9 +356,9 @@ pub fn formatConfluencePage(allocator: std.mem.Allocator, json_str: []const u8, 
 
     const root = parsed.value.object;
 
-    var output = try std.ArrayList(u8).initCapacity(allocator, 1024);
-    errdefer output.deinit(allocator);
-    const writer = output.writer(allocator);
+    var output: std.Io.Writer.Allocating = try .initCapacity(allocator, 1024);
+    errdefer output.deinit();
+    const writer = &output.writer;
 
     // Title
     const title = if (root.get("title")) |t| t.string else "Untitled";
@@ -423,7 +423,7 @@ pub fn formatConfluencePage(allocator: std.mem.Allocator, json_str: []const u8, 
         }
     }
 
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 /// Format generic JSON list (spaces, projects, etc.) as readable text
@@ -431,9 +431,9 @@ pub fn formatGenericList(allocator: std.mem.Allocator, json_str: []const u8, ite
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
     defer parsed.deinit();
 
-    var output = try std.ArrayList(u8).initCapacity(allocator, 1024);
-    errdefer output.deinit(allocator);
-    const writer = output.writer(allocator);
+    var output: std.Io.Writer.Allocating = try .initCapacity(allocator, 1024);
+    errdefer output.deinit();
+    const writer = &output.writer;
 
     // Try different array field names
     const root = parsed.value;
@@ -479,7 +479,7 @@ pub fn formatGenericList(allocator: std.mem.Allocator, json_str: []const u8, ite
             try writer.writeAll("\n");
         }
 
-        return output.toOwnedSlice(allocator);
+        return output.toOwnedSlice();
     }
 
     return try allocator.dupe(u8, "No items found.\n");

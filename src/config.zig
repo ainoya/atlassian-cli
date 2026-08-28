@@ -8,10 +8,14 @@ pub const Config = struct {
 
     // Allocator used for internal strings
     allocator: std.mem.Allocator,
+    io: std.Io,
+    environ: std.process.Environ,
 
-    pub fn init(allocator: std.mem.Allocator) Config {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ) Config {
         return .{
             .allocator = allocator,
+            .io = io,
+            .environ = environ,
         };
     }
 
@@ -22,16 +26,18 @@ pub const Config = struct {
     }
 
     pub fn load(self: *Config) !void {
-        const config_path = try getConfigPath(self.allocator);
+        const config_path = try getConfigPath(self.allocator, self.environ);
         defer self.allocator.free(config_path);
 
-        const file = std.fs.openFileAbsolute(config_path, .{}) catch |err| {
+        const content = std.Io.Dir.cwd().readFileAlloc(
+            self.io,
+            config_path,
+            self.allocator,
+            .limited(1024 * 1024),
+        ) catch |err| {
             if (err == error.FileNotFound) return;
             return err;
         };
-        defer file.close();
-
-        const content = try file.readToEndAlloc(self.allocator, 1024 * 1024);
         defer self.allocator.free(content);
 
         const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, content, .{});
@@ -60,24 +66,28 @@ pub const Config = struct {
     }
 
     pub fn save(self: *Config) !void {
-        const config_path = try getConfigPath(self.allocator);
+        const config_path = try getConfigPath(self.allocator, self.environ);
         defer self.allocator.free(config_path);
 
         // Ensure directory exists
         if (std.fs.path.dirname(config_path)) |dir| {
-            try std.fs.cwd().makePath(dir);
+            try std.Io.Dir.cwd().createDirPath(self.io, dir);
         }
 
-        const file = try std.fs.createFileAbsolute(config_path, .{
+        const file = try std.Io.Dir.createFileAbsolute(self.io, config_path, .{
             .read = true,
             .truncate = true,
-            .mode = 0o600,
         });
-        defer file.close();
+        defer file.close(self.io);
 
-        var list = std.ArrayListUnmanaged(u8){};
-        defer list.deinit(self.allocator);
-        const writer = list.writer(self.allocator);
+        // The config file holds an API token, so keep it owner-only.
+        if (builtin.os.tag != .windows) {
+            try file.setPermissions(self.io, @enumFromInt(0o600));
+        }
+
+        var list: std.Io.Writer.Allocating = .init(self.allocator);
+        defer list.deinit();
+        const writer = &list.writer;
 
         try writer.writeAll("{\n");
         var first = true;
@@ -105,7 +115,10 @@ pub const Config = struct {
         }
         try writer.writeAll("\n}");
 
-        try file.writeAll(list.items);
+        var file_buffer: [1024]u8 = undefined;
+        var file_writer = file.writer(self.io, &file_buffer);
+        try file_writer.interface.writeAll(list.written());
+        try file_writer.interface.flush();
     }
 
     fn jsonStringify(val: []const u8, writer: anytype) !void {
@@ -144,10 +157,10 @@ pub const Config = struct {
     }
 };
 
-fn getConfigPath(allocator: std.mem.Allocator) ![]u8 {
-    const env_home = std.process.getEnvVarOwned(allocator, "HOME") catch |err| {
+fn getConfigPath(allocator: std.mem.Allocator, environ: std.process.Environ) ![]u8 {
+    const env_home = environ.getAlloc(allocator, "HOME") catch |err| {
         if (builtin.os.tag == .windows) {
-            return std.process.getEnvVarOwned(allocator, "USERPROFILE");
+            return environ.getAlloc(allocator, "USERPROFILE");
         }
         return err;
     };
