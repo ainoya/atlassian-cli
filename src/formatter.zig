@@ -1089,9 +1089,10 @@ test "extractAdfUrls collects link marks and cards" {
         allocator.free(urls);
     }
 
+    // Document order: the link mark on the text node precedes the inline card.
     try std.testing.expectEqual(@as(usize, 2), urls.len);
-    try std.testing.expectEqualStrings("https://x/wiki/spaces/OPS/pages/2", urls[0]);
-    try std.testing.expectEqualStrings("https://x/wiki/spaces/OPS/pages/1", urls[1]);
+    try std.testing.expectEqualStrings("https://x/wiki/spaces/OPS/pages/1", urls[0]);
+    try std.testing.expectEqualStrings("https://x/wiki/spaces/OPS/pages/2", urls[1]);
 }
 
 test "extractHtmlUrls collects anchor targets" {
