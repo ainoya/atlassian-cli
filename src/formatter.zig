@@ -642,6 +642,102 @@ pub fn formatJiraComments(allocator: std.mem.Allocator, json_str: []const u8, is
     return output.toOwnedSlice();
 }
 
+/// Collect every URL an ADF document links to: the href of link marks, and
+/// the url attribute of inline and embed cards. Caller owns each string and
+/// the slice.
+pub fn extractAdfUrls(allocator: std.mem.Allocator, node: std.json.Value) ![][]u8 {
+    var urls = try std.ArrayList([]u8).initCapacity(allocator, 4);
+    errdefer {
+        for (urls.items) |url| allocator.free(url);
+        urls.deinit(allocator);
+    }
+
+    const max_depth = 64;
+    const Frame = struct { items: []const std.json.Value, idx: usize };
+    var stack: [max_depth]Frame = undefined;
+
+    if (node != .object) return try urls.toOwnedSlice(allocator);
+    const root_content = node.object.get("content") orelse return try urls.toOwnedSlice(allocator);
+    if (root_content != .array) return try urls.toOwnedSlice(allocator);
+
+    stack[0] = .{ .items = root_content.array.items, .idx = 0 };
+    var depth: usize = 1;
+
+    while (depth > 0) {
+        const frame = &stack[depth - 1];
+        if (frame.idx >= frame.items.len) {
+            depth -= 1;
+            continue;
+        }
+        const child = frame.items[frame.idx];
+        frame.idx += 1;
+
+        if (child != .object) continue;
+        const obj = child.object;
+
+        if (stringField(obj, "type")) |node_type| {
+            if (std.mem.eql(u8, node_type, "inlineCard") or std.mem.eql(u8, node_type, "embedCard")) {
+                if (attrString(obj, "url")) |url| {
+                    try urls.append(allocator, try allocator.dupe(u8, url));
+                }
+            }
+        }
+
+        if (linkHref(obj)) |href| {
+            try urls.append(allocator, try allocator.dupe(u8, href));
+        }
+
+        if (obj.get("content")) |content| {
+            if (content == .array and depth < max_depth) {
+                stack[depth] = .{ .items = content.array.items, .idx = 0 };
+                depth += 1;
+            }
+        }
+    }
+
+    return try urls.toOwnedSlice(allocator);
+}
+
+/// Collect the href of every anchor in an HTML document, such as the
+/// Confluence storage format. Caller owns each string and the slice.
+pub fn extractHtmlUrls(allocator: std.mem.Allocator, html: []const u8) ![][]u8 {
+    var urls = try std.ArrayList([]u8).initCapacity(allocator, 8);
+    errdefer {
+        for (urls.items) |url| allocator.free(url);
+        urls.deinit(allocator);
+    }
+
+    var i: usize = 0;
+    while (i < html.len) {
+        if (html[i] != '<') {
+            i += 1;
+            continue;
+        }
+        const close = std.mem.indexOfScalarPos(u8, html, i + 1, '>') orelse break;
+        const tag_inner = html[i + 1 .. close];
+        if (tagNameIs(trimAsciiWhitespace(tag_inner), "a")) {
+            if (extractHtmlAttr(tag_inner, "href")) |href| {
+                try urls.append(allocator, try allocator.dupe(u8, href));
+            }
+        }
+        i = close + 1;
+    }
+
+    return try urls.toOwnedSlice(allocator);
+}
+
+/// The page id in a Confluence page URL, as in
+/// ".../spaces/OPS/pages/12345/Title". Null when the URL has no such segment.
+pub fn extractConfluencePageId(url: []const u8) ?[]const u8 {
+    const marker = "/pages/";
+    const pos = std.mem.indexOf(u8, url, marker) orelse return null;
+    const start = pos + marker.len;
+    var end = start;
+    while (end < url.len and std.ascii.isDigit(url[end])) : (end += 1) {}
+    if (end == start) return null;
+    return url[start..end];
+}
+
 /// Format Confluence page as readable text
 /// base_url: Atlassian base URL (e.g. https://your-domain.atlassian.net)
 pub fn formatConfluencePage(
@@ -957,4 +1053,60 @@ test "formatConfluenceSearchResults no longer emits a hardcoded host" {
 
     try std.testing.expect(std.mem.indexOf(u8, formatted, "https://wiki.example.com/confluence/spaces/OPS/pages/999") != null);
     try std.testing.expect(std.mem.indexOf(u8, formatted, "https://.atlassian.net") == null);
+}
+
+test "extractConfluencePageId reads the id out of a page URL" {
+    try std.testing.expectEqualStrings("12345", extractConfluencePageId("https://x/wiki/spaces/OPS/pages/12345/Title").?);
+    try std.testing.expectEqualStrings("7", extractConfluencePageId("https://x/wiki/spaces/OPS/pages/7").?);
+    try std.testing.expect(extractConfluencePageId("https://x/browse/PROJ-1") == null);
+    try std.testing.expect(extractConfluencePageId("https://x/pages/notanumber") == null);
+}
+
+test "extractAdfUrls collects link marks and cards" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "type": "doc",
+        \\  "content": [
+        \\    { "type": "paragraph", "content": [
+        \\      { "type": "text", "text": "runbook",
+        \\        "marks": [{ "type": "link", "attrs": { "href": "https://x/wiki/spaces/OPS/pages/1" } }] },
+        \\      { "type": "inlineCard", "attrs": { "url": "https://x/wiki/spaces/OPS/pages/2" } }
+        \\    ]},
+        \\    { "type": "paragraph", "content": [
+        \\      { "type": "text", "text": "plain, no link" }
+        \\    ]}
+        \\  ]
+        \\}
+    ;
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+
+    const urls = try extractAdfUrls(allocator, parsed.value);
+    defer {
+        for (urls) |url| allocator.free(url);
+        allocator.free(urls);
+    }
+
+    // Document order: the link mark on the text node precedes the inline card.
+    try std.testing.expectEqual(@as(usize, 2), urls.len);
+    try std.testing.expectEqualStrings("https://x/wiki/spaces/OPS/pages/1", urls[0]);
+    try std.testing.expectEqualStrings("https://x/wiki/spaces/OPS/pages/2", urls[1]);
+}
+
+test "extractHtmlUrls collects anchor targets" {
+    const allocator = std.testing.allocator;
+
+    const urls = try extractHtmlUrls(allocator,
+        "<p>see <a href=\"https://x/wiki/spaces/OPS/pages/3\">this</a> and <img src=\"https://x/i.png\"/> " ++
+            "and <a class='c' href='https://x/wiki/spaces/OPS/pages/4'>that</a></p>");
+    defer {
+        for (urls) |url| allocator.free(url);
+        allocator.free(urls);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), urls.len);
+    try std.testing.expectEqualStrings("https://x/wiki/spaces/OPS/pages/3", urls[0]);
+    try std.testing.expectEqualStrings("https://x/wiki/spaces/OPS/pages/4", urls[1]);
 }
