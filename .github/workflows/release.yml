@@ -47,7 +47,7 @@ jobs:
       - run: git fetch --force --tags
       - run: git checkout ${{ needs.tagpr.outputs.tag }}
       
-      - uses: jdx/mise-action@v4
+      - uses: jdx/mise-action@v5
         with:
           cache: true
       - uses: actions/create-github-app-token@v3
