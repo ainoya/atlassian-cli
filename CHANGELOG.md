@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.5](https://github.com/ainoya/atlassian-cli/compare/v0.0.4...v0.0.5) - 2026-11-01
+
+- chore(renovate): batch updates into one monthly PR by @ainoya in https://github.com/ainoya/atlassian-cli/pull/24
+
 ## [v0.0.4](https://github.com/ainoya/atlassian-cli/compare/v0.0.3...v0.0.4) - 2026-08-28
 
 - Close the remaining gaps from the formatter review issues by @ainoya in https://github.com/ainoya/atlassian-cli/pull/21
